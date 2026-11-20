@@ -1,0 +1,19 @@
+# Source-import inventory only; unpinned, not installed or runtime-validated.
+# Private data, mappings and model artifacts are not provided.
+numpy
+pandas
+scipy
+scikit-learn
+xgboost
+mlflow
+requests
+urllib3
+minio
+matplotlib
+seaborn
+plotly
+statsmodels
+joblib
+openpyxl
+pyomo
+ipython

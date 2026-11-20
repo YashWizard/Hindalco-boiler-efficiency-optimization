@@ -1,0 +1,706 @@
+############################## PYTHON 3 ############################
+import time
+import os
+import mlflow
+import urllib3
+import requests
+import warnings
+import numpy as np
+import pandas as pd
+from scipy.optimize import minimize
+from requests.auth import HTTPBasicAuth
+from threading import Lock
+from urllib.parse import urlparse
+from collections import deque
+from datetime import datetime, timedelta
+
+class AdaptiveBoundsAndConstraintsManager:
+    '\n    Manages adaptive bounds and constraints for SCC optimization.\n    \n    This class automatically adjusts optimization bounds and constraint values\n    based on real-time plant data collected over hourly intervals. It uses\n    statistical analysis of actual operating parameters to create realistic\n    bounds that reflect current plant conditions.\n    '
+    
+    def __init__(self, buffer_margin=0.15):
+        '\n        Initialize the adaptive bounds manager.\n        \n        Args:\n            buffer_margin (float): Safety margin for bounds expansion (default: 15%)\n        '
+        self.buffer_margin = buffer_margin
+        
+        # Store hourly data for each of the 14 parameters
+        # Each deque has max length 3600 (assuming 1-second intervals for 1 hour)
+        self.hourly_data = {i: deque(maxlen=3600) for i in range(14)}
+        
+        # Initial bounds - these will be updated based on real plant data
+        # Updated to ensure constraint compatibility
+        self.current_bounds = [
+            (4.5, 5.5),    # x[0] - Fuel-air ratio
+            (190, 300),    # x[1] - Total air flow (increased to satisfy air/fuel constraint)
+            (38, 100),     # x[2] - Wind box DP (increased to meet constraint minimum)
+            (10, 50),      # x[3] - PA fan primary air flow
+            (10, 50),      # x[4] - Wind box air flow
+            (0.5, 1.5),    # x[5] - Secondary to primary ratio
+            (130, 300),    # x[6] - Steam flow (increased to meet constraint minimum)
+            (380, 420),    # x[7] - Superheater temp
+            (290, 350),    # x[8] - ECO gas temp
+            (35, 90),      # x[9] - Coal flow (increased to meet constraint minimum)
+            (240, 300),    # x[10] - ESP duct gas temp
+            (150, 250),    # x[11] - FD water flow
+            (110, 170),    # x[12] - FD water temp
+            (2, 6)         # x[13] - O2
+        ]
+        
+        # Keep original bounds as reference for safety limits
+        self.original_bounds = self.current_bounds.copy()
+        
+        # Adaptive constraint minimum values (these update with bounds)
+        self.current_constraint_mins = {
+            'wind_box_dp_min': 38.0,        # Minimum wind box DP for operation
+            'steam_flow_min': 130.0,        # Minimum steam flow for stable operation
+            'coal_flow_min': 35.0,          # Minimum coal flow for efficient combustion
+            'air_fuel_ratio_min': 2.11,     # Fixed minimum air/fuel ratio for safety
+        }
+        
+        # Track last update time for hourly intervals
+        self.last_update = datetime.now()
+        
+    def add_real_time_data(self, parameter_values):
+        '\n        Add current parameter values to rolling hourly buffers.\n        \n        Args:\n            parameter_values (list): List of 14 current parameter values from PI tags\n        '
+        for i, value in enumerate(parameter_values):
+            # Only add valid numeric values (exclude None and NaN)
+            if value is not None and isinstance(value, (int, float)) and not np.isnan(value):
+                self.hourly_data[i].append(value)
+    
+    def calculate_adaptive_bounds_and_constraints(self):
+        "\n        Calculate new bounds and constraint minimums based on past hour's data.\n        \n        Uses statistical analysis (10th-90th percentiles) to determine realistic\n        operating ranges while maintaining safety margins and constraint compatibility.\n        \n        Returns:\n            tuple: (new_bounds, new_constraint_mins)\n        "
+        new_bounds = []
+        new_constraint_mins = self.current_constraint_mins.copy()
+        
+        # Process each parameter
+        for i in range(14):
+            # Check if we have sufficient data for reliable statistics
+            if len(self.hourly_data[i]) > 20:
+                data = list(self.hourly_data[i])
+                
+                # Use robust percentiles to avoid outliers
+                p10 = np.percentile(data, 10)  # 10th percentile as lower bound
+                p90 = np.percentile(data, 90)  # 90th percentile as upper bound
+                
+                # Add buffer margin for optimization exploration
+                range_buffer = (p90 - p10) * self.buffer_margin
+                new_min = max(p10 - range_buffer, self.original_bounds[i][0] * 0.85)
+                new_max = min(p90 + range_buffer, self.original_bounds[i][1] * 1.15)
+                
+                # Apply parameter-specific constraint enforcement
+                if i == 1:  # Air flow - ensure minimum for air/fuel ratio
+                    new_min = max(new_min, 190.0)
+                elif i == 2:  # Wind box DP - operational minimum
+                    new_min = max(new_min, 38.0)
+                    new_constraint_mins['wind_box_dp_min'] = new_min
+                elif i == 6:  # Steam flow - operational minimum
+                    new_min = max(new_min, 130.0)
+                    new_constraint_mins['steam_flow_min'] = new_min
+                elif i == 9:  # Coal flow - operational minimum
+                    new_min = max(new_min, 35.0)
+                    new_constraint_mins['coal_flow_min'] = new_min
+                
+                new_bounds.append((new_min, new_max))
+            else:
+                # Insufficient data - keep current bounds
+                new_bounds.append(self.current_bounds[i])
+                
+        return new_bounds, new_constraint_mins
+    
+    def should_update_bounds(self):
+        "\n        field_0089 field_0090 field_0091'field_0092 field_0088 field_0012 field_0093 field_0001 update.\n        \n        field_0094:\n            field_0095: field_0096 field_0090 field_0097 field_0098 field_0099 field_0100 field_0101 field_0102 update\n        "
+        return (datetime.now() - self.last_update) >= timedelta(hours=1)
+    
+    def update_bounds_and_constraints_if_needed(self):
+        '\n        Update field_0001 and field_0002 field_0090 field_0093 field_0103 field_0099 field_0100.\n        \n        field_0094:\n            field_0095: field_0096 field_0090 field_0001 field_0104 field_0105, field_0106 field_0107\n        '
+        if self.should_update_bounds():
+            try:
+                # Calculate new adaptive bounds and constraints
+                new_bounds, new_constraint_mins = self.calculate_adaptive_bounds_and_constraints()
+                
+                # Validate that new bounds don't create impossible constraint combinations
+                if self.validate_bounds_compatibility(new_bounds, new_constraint_mins):
+                    # Apply new bounds and constraints
+                    self.current_bounds = new_bounds
+                    self.current_constraint_mins = new_constraint_mins
+                    self.last_update = datetime.now()
+                    
+                    # Clear data buffers for next hour
+                    for i in range(14):
+                        self.hourly_data[i].clear()
+                        
+                    print(f"Adaptive bounds updated at {self.last_update.strftime('%H:%M:%S')}")
+                    return True
+                else:
+                    print('Bounds validation failed, keeping current values')
+            except Exception as e:
+                print(f"Bounds update error: {str(e)}")
+        return False
+    
+    def validate_bounds_compatibility(self, new_bounds, new_constraint_mins):
+        "\n        Validate that new bounds don't create impossible constraint combinations.\n        \n        Args:\n            new_bounds (list): Proposed new bounds\n            new_constraint_mins (dict): Proposed new constraint minimums\n            \n        Returns:\n            bool: True if bounds are compatible with constraints\n        "
+        try:
+            # Test several random samples from new bounds
+            for _ in range(3):
+                test_values = [np.random.uniform(low, high) for (low, high) in new_bounds]
+                
+                # Check critical operational constraints
+                if test_values[2] < new_constraint_mins['wind_box_dp_min']:
+                    return False
+                if test_values[6] < new_constraint_mins['steam_flow_min']:
+                    return False
+                if test_values[9] < new_constraint_mins['coal_flow_min']:
+                    return False
+                if (test_values[1] / test_values[9]) < new_constraint_mins['air_fuel_ratio_min']:
+                    return False
+                    
+            return True
+        except:
+            return False
+
+class Utkal_Boiler_B3:
+    '\n    Main class for UTKL Boiler B3 SCC optimization with adaptive bounds.\n    \n    This class integrates PI data reading, ML model prediction, multi-start optimization,\n    and adaptive bounds management for real-time SCC optimization.\n    '
+    
+    def __init__(self):
+        'Initialize the boiler optimization system with all required components.'
+        
+        # Disable SSL warnings for PI Web API connections
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+        # PI Web API credentials
+        self.username = 'REDACTED_CONFIG_VALUE'
+        self.password = 'REDACTED_CONFIG_VALUE'
+
+        # Batch processing configuration for efficient PI tag reading
+        self._batch_urls = set()
+        self._batch_cache = {}
+        self._batch_lock = Lock()
+        self._last_batch_time = 0
+        self._batch_interval = 0.5  # 500ms batch interval
+
+        # MLflow configuration for model access
+        os.environ['MLFLOW_TRACKING_INSECURE_TLS'] = 'true'
+        os.environ['MLFLOW_TRACKING_USERNAME'] = 'REDACTED_CONFIG_VALUE'
+        os.environ['MLFLOW_TRACKING_PASSWORD'] = 'REDACTED_CONFIG_VALUE'
+
+        # Initialize MLflow and load trained model
+        mlflow.set_tracking_uri('https://example.invalid/endpoint_0045')
+        self.model = self.load_model()
+
+        # Define model features in exact order expected by the ML model
+        self.model_features = [
+            'process_signal_0167',            # Fuel-air ratio
+            'process_signal_0176',               # Wind box differential pressure
+            'process_signal_0202',          # Primary air fan total flow
+            'process_signal_0196',       # Wind box air flow total
+            'process_signal_0204', # Main steam flow
+            'process_signal_0183',          # Economizer flue gas temperature
+            'process_signal_0209',    # Superheater temperature
+            'process_signal_0178',               # Coal feeder total flow
+            'process_signal_0187', # ESP inlet temperature
+            'process_signal_0189',          # Feed water flow
+            'process_signal_0194',            # Feed water temperature
+            'process_signal_0169',                       # Oxygen percentage
+            'process_signal_0172',                # Steam enthalpy
+            'process_signal_0165',             # Feed water enthalpy
+        ]
+
+        # Initialize adaptive bounds and constraints manager
+        self.bounds_manager = AdaptiveBoundsAndConstraintsManager(buffer_margin=0.15)
+        self.bounds = self.bounds_manager.current_bounds
+        
+        # SCC optimization target
+        self.max_scc = 0.202  # Maximum allowable SCC
+        
+        # Initialize adaptive constraints
+        self.update_constraints()
+        
+        # Initialize PI tag URLs
+        self.tags = self.initialize_tags()
+        
+    def load_model(self):
+        '\n        Load the trained XGBoost model from MLflow.\n        \n        Returns:\n            XGBoost model object for SCC prediction\n        '
+        logged_model_uri = 'runs:/model_run_0002/model'
+        return mlflow.xgboost.load_model(logged_model_uri)
+
+    def update_constraints(self):
+        '\n        Update field_0005 field_0002 field_0006 field_0007 field_0008 field_0009 field_0010.\n        \n        field_0108 field_0109 field_0110 field_0111 field_0112 field_0113 field_0114 field_0115 field_0008 field_0009\n        field_0116 values from field_0115 field_0001 field_0117, field_0118 field_0002 field_0119\n        with field_0120 field_0121 field_0122.\n        '
+        constraint_mins = self.bounds_manager.current_constraint_mins
+        
+        # Define adaptive constraints for optimization
+        self.cons = [
+            # Air-to-fuel ratio constraint (safety requirement)
+            {'type': 'ineq', 'fun': self.air_to_fuel_ratio},
+            
+            # Coal flow minimum (adaptive based on recent data)
+            {'type': 'ineq', 'fun': lambda x: x[9] - constraint_mins['coal_flow_min']},
+            
+            # Steam flow minimum (adaptive based on recent data)
+            {'type': 'ineq', 'fun': lambda x: x[6] - constraint_mins['steam_flow_min']},
+            
+            # Wind box DP minimum (adaptive based on recent data)
+            {'type': 'ineq', 'fun': lambda x: x[2] - constraint_mins['wind_box_dp_min']},
+            
+            # SCC constraint (fixed maximum for regulatory compliance)
+            {'type': 'ineq', 'fun': self.scc_constraint},
+        ]
+
+    def objective(self, x):
+        '\n        Optimization objective function: maximize boiler efficiency.\n        \n        Args:\n            x (list): Parameter values for optimization\n            \n        Returns:\n            float: Negative efficiency (for minimization)\n        '
+        input_df = pd.DataFrame([x], columns=self.model_features)
+        return -self.model.predict(input_df)[0]
+
+    def air_to_fuel_ratio(self, x):
+        '\n        Air-to-fuel ratio constraint function.\n        \n        Args:\n            x (list): Parameter values\n            \n        Returns:\n            float: Constraint value (must be >= 0 for feasibility)\n        '
+        constraint_mins = self.bounds_manager.current_constraint_mins
+        return (x[1] / x[9]) - constraint_mins['air_fuel_ratio_min']
+
+    def scc_constraint(self, x):
+        '\n        SCC constraint function: ensures SCC <= 0.202.\n        \n        Args:\n            x (list): Parameter values\n            \n        Returns:\n            float: Constraint value (must be >= 0 for feasibility)\n        '
+        return self.max_scc - (x[9] / x[6])
+
+    def validate_solution(self, x):
+        '\n        Validate that optimization solution satisfies all constraints.\n        \n        Args:\n            x (list): Parameter values to validate\n            \n        Returns:\n            bool: True if all constraints are satisfied\n        '
+        return all(c['fun'](x) >= -1e-6 for c in self.cons)
+        
+    def multi_start_optimization(self, n_runs=50):
+        '\n        Multi-start optimization to find global optimum.\n        \n        Runs the optimizer from multiple random starting points within\n        adaptive bounds to increase chance of finding global optimum\n        and avoid local minima.\n        \n        Args:\n            n_runs (int): Number of optimization attempts\n            \n        Returns:\n            tuple: (best_solution, best_efficiency)\n        '
+        # Use current adaptive bounds for optimization
+        current_bounds = self.bounds_manager.current_bounds
+        
+        best_solution = None
+        best_efficiency = -np.inf
+        
+        # Run optimization from multiple random starting points
+        for i in range(n_runs):
+            # Generate random initial guess within adaptive bounds
+            x0 = [np.random.uniform(low, high) for (low, high) in current_bounds]
+            
+            try:
+                # Run local optimization with SLSQP method
+                res = minimize(
+                    self.objective,           # Maximize efficiency
+                    x0,                      # Starting point
+                    method='SLSQP',          # Sequential Quadratic Programming
+                    bounds=current_bounds,    # Parameter bounds
+                    constraints=self.cons     # Operational constraints
+                )
+                
+                # Log optimization attempt results
+                print(f"[Run {i+1}] Success: {res.success}, Fun: {-res.fun if res.success else 'N/A'}, Message: {res.message}")
+                
+                # Update best solution if this attempt is better
+                if res.success and (-res.fun > best_efficiency):
+                    best_solution = res.x
+                    best_efficiency = -res.fun
+                    
+            except Exception as e:
+                print(f"[Run {i+1}] Optimization error: {e}")
+                continue
+    
+        # Check if any optimization succeeded
+        if best_solution is None:
+            raise RuntimeError('All optimization attempts failed.')
+            
+        return best_solution, best_efficiency
+
+    def initialize_tags(self):
+        '\n        Initialize PI Web API tag URLs for data reading.\n        \n        Returns:\n            dict: Mapping of tag names to PI Web API URLs\n        '
+        return {
+            # Primary process parameters
+            'process_signal_0167': 
+                'https://example.invalid/endpoint_0046',
+            
+            'process_signal_0174': 
+                'https://example.invalid/endpoint_0047',
+            
+            'process_signal_0176': 
+                'https://example.invalid/endpoint_0048',
+
+            # PA Fan air flows (will be summed for total)
+            'process_signal_0198': 
+                'https://example.invalid/endpoint_0049',
+            'process_signal_0199': 
+                'https://example.invalid/endpoint_0050',
+            'process_signal_0200': 
+                'https://example.invalid/endpoint_0051',
+            'process_signal_0201': 
+                'https://example.invalid/endpoint_0052',
+            
+            # Wind box air flows (will be summed for total)
+            'process_signal_0211': 
+                'https://example.invalid/endpoint_0053',
+            'process_signal_0212': 
+                'https://example.invalid/endpoint_0054',
+            'process_signal_0213': 
+                'https://example.invalid/endpoint_0055',
+            'process_signal_0214': 
+                'https://example.invalid/endpoint_0056',
+        
+            # Steam and temperature measurements
+            'process_signal_0197': 
+                'https://example.invalid/endpoint_0057',
+
+            'process_signal_0206':
+                'https://example.invalid/endpoint_0058',
+            
+            'process_signal_0207': 
+                'https://example.invalid/endpoint_0059',
+
+            # Economizer temperatures (will be averaged)
+            'process_signal_0180': 
+                'https://example.invalid/endpoint_0060',
+            'process_signal_0181': 
+                'https://example.invalid/endpoint_0061',
+            'process_signal_0182': 
+                'https://example.invalid/endpoint_0062',
+
+            # Coal and ESP measurements
+            'process_signal_0178':
+                'https://example.invalid/endpoint_0063',
+
+            'process_signal_0185': 
+                'https://example.invalid/endpoint_0064',
+            'process_signal_0186': 
+                'https://example.invalid/endpoint_0065',
+
+            # Feed water measurements
+            'process_signal_0192': 
+                'https://example.invalid/endpoint_0066',
+            'process_signal_0193': 
+                'https://example.invalid/endpoint_0067',
+            'process_signal_0194': 
+                'https://example.invalid/endpoint_0068',
+            
+            # Calculated parameters
+            'process_signal_0169': 
+                'https://example.invalid/endpoint_0069',
+        
+            'Specific_coal_cons': 
+                'https://example.invalid/endpoint_0070',
+        
+            'process_signal_0172': 
+                'https://example.invalid/endpoint_0071',
+            'process_signal_0165':
+                'https://example.invalid/endpoint_0072',
+           
+            'process_signal_0209':
+                'https://example.invalid/endpoint_0073'
+        }
+
+    def safe_avg(self, values):
+        '\n        Calculate safe average of numeric values, handling None and non-numeric values.\n        \n        Args:\n            values (list): List of values to average\n            \n        Returns:\n            float or None: Average of numeric values, or None if no valid values\n        '
+        numeric_values = [v for v in values if isinstance(v, (int, float))]
+        if numeric_values:
+            return sum(numeric_values) / len(numeric_values)
+        else:
+            return None
+
+    def _get_batch_url(self, tag_url):
+        '\n        Extract batch API URL from individual tag URL.\n        \n        Args:\n            tag_url (str): Individual PI tag URL\n            \n        Returns:\n            str: Batch API URL\n        '
+        parsed = urlparse(tag_url)
+        return f"{parsed.scheme}://{parsed.netloc}/piwebapi/batch"
+
+    def _batch_fetch(self, urls):
+        '\n        Fetch multiple PI tag values in a single batch request for efficiency.\n        \n        Args:\n            urls (list): List of PI tag URLs to fetch\n        '
+        if not urls:
+            return
+
+        batch_url = self._get_batch_url(urls[0])
+        
+        # Create batch payload with multiple GET requests
+        batch_payload = {
+            f"req{i}": {
+                'Method': 'GET',
+                'Resource': url
+            } for i, url in enumerate(urls)
+        }
+
+        try:
+            # Execute batch request
+            response = requests.post(
+                batch_url,
+                json=batch_payload,
+                auth=HTTPBasicAuth(self.username, self.password),
+                verify=False
+            )
+            response.raise_for_status()
+            batch_results = response.json()
+
+            # Process batch results and cache values
+            for i, url in enumerate(urls):
+                result = batch_results.get(f"req{i}")
+                value = None
+
+                if result and 'Content' in result:
+                    content = result['Content']
+                    if isinstance(content, dict):
+                        if 'Value' in content:
+                            value = content['Value']
+                        elif 'Value' in content.get('Value', {}):
+                            value = content['Value']['Value']
+
+                self._batch_cache[url] = value
+
+        except Exception as e:
+            print(f"Batch fetch error: {e}")
+            # Set None for all URLs on batch failure
+            for url in urls:
+                self._batch_cache[url] = None
+
+    def read_tag_value(self, url):
+        '\n        Read single PI tag value with batch processing optimization.\n        \n        Args:\n            url (str): PI tag URL\n            \n        Returns:\n            float or None: Tag value, or None if read failed\n        '
+        # Use batch processing for efficiency
+        with self._batch_lock:
+            now = time.time()
+            self._batch_urls.add(url)
+
+            # Execute batch if interval elapsed
+            if (now - self._last_batch_time) > self._batch_interval:
+                urls_to_fetch = list(self._batch_urls)
+                self._batch_urls.clear()
+                self._last_batch_time = now
+                self._batch_fetch(urls_to_fetch)
+
+            # Return cached value if available
+            if url in self._batch_cache:
+                return self._batch_cache[url]
+
+        # Fallback to individual fetch if not cached
+        try:
+            response = requests.get(url, auth=HTTPBasicAuth(self.username, self.password), verify=False)
+            response.raise_for_status()
+            data = response.json()
+
+            value = data.get('Value')
+            if isinstance(value, (int, float)):
+                return value
+            if isinstance(value, dict):
+                if 'Value' in value:
+                    return value['Value']
+
+            return None
+
+        except Exception as e:
+            print(f"Error fetching from {url}: {e}")
+            return None
+    
+    def write_predictions_to_pi(self, predictions: dict):
+        '\n        Write multiple optimized predictions to their corresponding PI tags.\n        \n        Args:\n            predictions (dict): Mapping of PI tag URLs to predicted values\n        '
+        headers = {'Content-Type': 'application/json'}
+    
+        for url, value in predictions.items():
+            payload = {
+                'Timestamp': '*',  # Use current timestamp
+                'Value': float(value)
+            }
+            try:
+                response = requests.post(
+                    url, json=payload, headers=headers,
+                    auth=HTTPBasicAuth(self.username, self.password),
+                    verify=False
+                )
+                response.raise_for_status()
+                print(f"Successfully wrote prediction {value:.4f} to PI tag")
+            except Exception as e:
+                print(f"Failed to write prediction to PI tag {url}: {e}")
+
+    def run(self):
+        '\n        Execute SCC optimization using adaptive bounds and return optimized predictions.\n        \n        Returns:\n            dict: Dictionary of optimized parameter predictions\n        '
+        # Initialize with adaptive bounds (not fixed midpoints)
+        x_initial = [np.mean(b) for b in self.bounds_manager.current_bounds]
+        eff_initial = self.model.predict(pd.DataFrame([x_initial], columns=self.model_features))[0]
+        scc_initial = x_initial[9] / x_initial[6]
+         
+        # Run multi-start optimization with adaptive bounds
+        x_opt, eff_opt = self.multi_start_optimization(n_runs=50)
+        scc_opt = x_opt[9] / x_opt[6]
+        
+        # Validate final solution
+        if not self.validate_solution(x_opt):
+            raise RuntimeError('Optimized solution violates constraints.')
+        
+        # Display optimization results
+        print('\n=== Boiler Efficiency Optimization ===')
+        print(f"{'Metric':<30} | {'Initial':>10} | {'Optimized':>10}")
+        print('-' * 55)
+        print(f"{'Boiler Efficiency (%)':<30} | {eff_initial:10.4f} | {eff_opt:10.4f}")
+        print(f"{'Specific Coal Consumption':<30} | {scc_initial:10.4f} | {scc_opt:10.4f}")
+        
+        print('\n=== All Parameter Changes ===')
+        for name, before, after in zip(self.model_features, x_initial, x_opt):
+            print(f"{name:55} | {before:7.3f} → {after:7.3f}")
+            
+        # Return optimized predictions for PI tag writing
+        predictions = {
+            'scc_prediction': scc_opt,
+            'process_signal_0168': x_opt[0],
+            'process_signal_0177': x_opt[1],
+            'process_signal_0203': x_opt[2],
+            'process_signal_0216': x_opt[3],
+            'process_signal_0205': x_opt[4],
+            'process_signal_0184': x_opt[5],
+            'process_signal_0210': x_opt[6],
+            'process_signal_0179': x_opt[7],
+            'process_signal_0188': x_opt[8],
+            'process_signal_0191': x_opt[9],
+            'process_signal_0195': x_opt[10],
+            'process_signal_0170': x_opt[11],
+            'process_signal_0173': x_opt[12],
+            'process_signal_0166': x_opt[13],
+        }
+            
+        return predictions
+        
+    def run_loop(self):
+        '\n        Main execution loop for continuous SCC optimization with adaptive bounds.\n        \n        This method runs continuously, reading PI tags, updating adaptive bounds,\n        performing optimization, and writing predictions back to PI tags.\n        '
+        while True:
+            try:
+                # Read all PI tag values
+                stored_list = [self.read_tag_value(url) for url in self.tags.values()]
+
+                # Log current tag values (can be disabled in production)
+                print('')
+                for i, tag in enumerate(self.tags.keys()):
+                    print(f"{tag}: {stored_list[i]}")
+
+                # Process and aggregate data according to model requirements
+                # Individual tag assignments for clarity
+                process_signal_0167 = stored_list[0]
+                process_signal_0174 = stored_list[1]
+                process_signal_0176 = stored_list[2]
+                
+                # PA Fan flows (indices 3-6, sum for total)
+                process_signal_0198 = stored_list[3]
+                process_signal_0199 = stored_list[4]
+                process_signal_0200 = stored_list[5]
+                process_signal_0201 = stored_list[6]
+                
+                # Wind box flows (indices 7-10, sum for total)
+                process_signal_0211 = stored_list[7]
+                process_signal_0212 = stored_list[8]
+                process_signal_0213 = stored_list[9]
+                process_signal_0214 = stored_list[10]
+                
+                # Steam and temperature measurements
+                process_signal_0204 = stored_list[11]
+                process_signal_0206 = stored_list[12]
+                process_signal_0207 = stored_list[13]
+                
+                # Economizer temperatures (indices 14-16, average for model input)
+                process_signal_0180 = stored_list[14]
+                process_signal_0181 = stored_list[15]
+                process_signal_0182 = stored_list[16]
+                
+                # Coal and ESP measurements
+                process_signal_0178 = stored_list[17]
+                process_signal_0185 = stored_list[18]
+                process_signal_0186 = stored_list[19]
+                
+                # Feed water measurements
+                process_signal_0192 = stored_list[20]
+                process_signal_0193 = stored_list[21]
+                process_signal_0194 = stored_list[22]
+                
+                # Calculated parameters
+                process_signal_0169 = stored_list[23]
+                Specific_coal_cons = stored_list[24]  # Current actual SCC
+                process_signal_0172 = stored_list[25]
+                process_signal_0165 = stored_list[26]
+                process_signal_0209 = stored_list[27]
+
+                # Aggregate data for model inputs
+                process_signal_0202 = sum(stored_list[3:7])
+                process_signal_0196 = sum(stored_list[7:11]) 
+                process_signal_0183 = self.safe_avg(stored_list[14:17])
+                process_signal_0187 = self.safe_avg(stored_list[18:20])  
+                process_signal_0190 = sum(stored_list[20:22])
+                
+                # Prepare model input array in exact sequence required by ML model
+                Model_inputs = [
+                    process_signal_0167,           # x[0]
+                    process_signal_0176,              # x[1]
+                    process_signal_0202,         # x[2]
+                    process_signal_0196,      # x[3]
+                    process_signal_0204, # x[4]
+                    process_signal_0183,         # x[5]
+                    process_signal_0209,   # x[6]
+                    process_signal_0178,              # x[7]
+                    process_signal_0187, # x[8]
+                    process_signal_0190,         # x[9]
+                    process_signal_0194,           # x[10]
+                    process_signal_0169,                      # x[11]
+                    process_signal_0172,               # x[12]
+                    process_signal_0165,            # x[13]
+                ]
+
+                # ADAPTIVE BOUNDS DATA COLLECTION
+                # Add current parameter values to adaptive bounds manager
+                self.bounds_manager.add_real_time_data(Model_inputs)
+
+                # CHECK FOR HOURLY BOUNDS UPDATE
+                # Update bounds and constraints if hour has passed
+                bounds_updated = self.bounds_manager.update_bounds_and_constraints_if_needed()
+                if bounds_updated:
+                    # Update constraints with new adaptive minimums
+                    self.update_constraints()
+                    # Update bounds reference for optimization
+                    self.bounds = self.bounds_manager.current_bounds
+                    print('Using updated adaptive bounds for next optimization cycle')
+
+                # Make real-time SCC prediction with current parameters
+                scc_prediction = self.model.predict([Model_inputs])[0]
+                
+                # Conservative prediction: don't predict worse than current actual
+                if scc_prediction > Specific_coal_cons:
+                    scc_prediction = Specific_coal_cons
+                
+                print('')
+                print(f"Real-time SCC Prediction: {scc_prediction:.4f}")
+
+                # Run optimization with adaptive bounds and constraints
+                predictions = self.run()
+                
+                # Write all optimized predictions to PI tags
+                tags_to_write = {
+                    # Current SCC prediction
+                    'https://example.invalid/endpoint_0074': scc_prediction,
+                    
+                    # Optimized parameter predictions
+                    'https://example.invalid/endpoint_0075': predictions['process_signal_0168'],
+                    'https://example.invalid/endpoint_0076': predictions['process_signal_0177'],
+                    'https://example.invalid/endpoint_0077': predictions['process_signal_0203'],
+                    'https://example.invalid/endpoint_0078': predictions['process_signal_0216'],
+                    'https://example.invalid/endpoint_0079': predictions['process_signal_0205'],
+                    'https://example.invalid/endpoint_0080': predictions['process_signal_0184'],
+                    'https://example.invalid/endpoint_0081': predictions['process_signal_0179'],
+                    'https://example.invalid/endpoint_0082': predictions['process_signal_0188'],
+                    'https://example.invalid/endpoint_0083': predictions['process_signal_0191'],
+                    'https://example.invalid/endpoint_0084': predictions['process_signal_0195'],
+                    'https://example.invalid/endpoint_0085': predictions['process_signal_0170'],
+                    'https://example.invalid/endpoint_0086': predictions['process_signal_0166'],
+                    'https://example.invalid/endpoint_0087': predictions['process_signal_0173'],
+                    'https://example.invalid/endpoint_0088': predictions['process_signal_0210']
+                }
+                
+                # Write all predictions to PI tags
+                self.write_predictions_to_pi(tags_to_write)
+                
+                print('')
+                print('---- Waiting 1 minute ----\n')
+
+                # Sleep for 1 minute before next cycle (10 seconds for testing)
+                time.sleep(10)  # Change to 60 for production
+
+            except Exception as e:
+                print(f"Error in optimization loop: {str(e)}")
+                time.sleep(10)  # Continue after error
+
+
+# Main execution
+if __name__ == '__main__':
+    print('UTKL Boiler B3 SCC Optimization System with Adaptive Bounds')
+    print('Real-time optimization with hourly bounds adaptation')
+    print('=' * 70)
+    
+    # Initialize and start the optimization system
+    utkal_B3 = Utkal_Boiler_B3()
+    example.invalid()

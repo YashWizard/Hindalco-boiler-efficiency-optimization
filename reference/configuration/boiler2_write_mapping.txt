@@ -1,0 +1,16 @@
+SCC_PRED=https://example.invalid/endpoint_0253
+process_signal_0120=https://example.invalid/endpoint_0254
+process_signal_0127=https://example.invalid/endpoint_0255
+process_signal_0153=https://example.invalid/endpoint_0256
+process_signal_0164=https://example.invalid/endpoint_0257
+process_signal_0155=https://example.invalid/endpoint_0258
+process_signal_0159=https://example.invalid/endpoint_0259
+process_signal_0134=https://example.invalid/endpoint_0260
+process_signal_0129=https://example.invalid/endpoint_0261
+process_signal_0138=https://example.invalid/endpoint_0262
+process_signal_0141=https://example.invalid/endpoint_0263
+process_signal_0145=https://example.invalid/endpoint_0264
+process_signal_0122=https://example.invalid/endpoint_0265
+process_signal_0118=https://example.invalid/endpoint_0266
+process_signal_0124=https://example.invalid/endpoint_0267
+process_signal_0159=https://example.invalid/endpoint_0268

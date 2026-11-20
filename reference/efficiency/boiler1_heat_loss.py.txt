@@ -1,0 +1,555 @@
+############################## PYTHON 3 ############################
+import time
+import os
+import mlflow
+import urllib3
+import requests
+import warnings
+import numpy as np
+import pandas as pd
+from scipy.optimize import minimize
+from requests.auth import HTTPBasicAuth
+from threading import Lock
+from urllib.parse import urlparse
+
+
+class Utkal_Boiler_B1:
+    def __init__(self):
+        
+        # Disable warnings for self-signed SSL certs
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+        # # Credentials
+        self.username = 'REDACTED_CONFIG_VALUE'
+        self.password = 'REDACTED_CONFIG_VALUE'
+
+        self._batch_urls = set()
+        self._batch_cache = {}
+        self._batch_lock = Lock()
+        self._last_batch_time = 0
+        self._batch_interval = 0.5  # seconds
+        
+        # self.username = "REDACTED_CONFIG_VALUE"
+        # self.password = "REDACTED_CONFIG_VALUE"
+
+        os.environ['MLFLOW_TRACKING_INSECURE_TLS'] = 'true'
+        os.environ['MLFLOW_TRACKING_USERNAME'] = 'REDACTED_CONFIG_VALUE'
+        os.environ['MLFLOW_TRACKING_PASSWORD'] = 'REDACTED_CONFIG_VALUE'
+
+        # OR model for Boiler Effeiciency
+        # MLflow configuration
+        mlflow.set_tracking_uri('https://example.invalid/endpoint_0045')
+        self.model = self.load_model()
+
+        # Model features and configuration
+        self.model_features = [
+            'process_signal_0032',
+            'process_signal_0018',
+            'process_signal_0004',
+            'process_signal_0069',
+            'process_signal_0081',
+            'process_signal_0089',
+            'process_signal_0025',
+            'process_signal_0038',
+            'process_signal_0053',
+            'process_signal_0015',
+            'process_signal_0045',
+            'process_signal_0016',
+            'process_signal_0037',
+            'process_signal_0102',
+            'process_signal_0113'
+        ]
+
+        self.var_index = {
+            'Tfg': 0, 'Tair': 1, 'Mdfg': 2, 'H2': 3,
+            'AAS': 4, 'CO': 5, 'CO2': 6, 'ASH': 7,
+            'ESP_ASH': 8, 'TM': 9, 'AF': 10, 'GCV': 11
+        }
+
+        self.additional_index = {
+            'MILL_REJ': 12, 'BLOW_DOWN': 13, 'ESP_RAD': 14,
+            'PA_FAN': 15, 'COAL_CONS': 16, 'NOX': 17,
+            'ESP_TEMP': 18, 'ECO_TEMP': 19, 'SUPR_HTR': 20, 'WIND_BOX': 21,
+            'REJECT_QUA': 22, 'REJECT_GCV': 23, 'MAKEUP_WATER': 24,
+            'STEAM_GEN': 25, 'STEAM_ENTHALPY': 26, 'FEEDW_ENTHALPY': 27
+        }
+
+        self.bounds = [
+            (120, 150), (15, 60), (5, 9), (2, 4), (0, 8), (0, 10),
+            (10, 16), (0, 30), (0, 100), (11, 15), (0.002, 0.3), (3500, 4000),
+            (0.03, 0.06), (0.22, 1.17), (1.12, 1.75),
+            (15.07, 31.26), (0.19, 0.37), (80.20, 296.96),
+            (101.65, 185.22), (290.00, 349.98),
+            (369.80, 436.67), (15.20, 49.99),
+            (1000, 1300), (1300, 1500), (10, 100),  # RejectQuality, Reject GCV, MakeUp Water
+            (50, 200), (750, 1000), (100, 200)      # Steam Gen, Steam Enthalpy, Feedwater Enthalpy
+        ]
+
+        self.C = 40.49  # Constant C for L5 formula
+
+        self.cons = [
+            {'type': 'ineq', 'fun': lambda x: x[self.var_index['Tfg']] - x[self.var_index['Tair']] - 10},
+            {'type': 'ineq', 'fun': lambda x: (x[self.var_index['AAS']] / x[self.var_index['Mdfg']]) - 1.5},
+            {'type': 'ineq', 'fun': lambda x: x[self.var_index['TM']] - x[self.var_index['H2']]}
+        ]
+
+        # self.x0 = np.array([
+        #     120, 30, 5, 3, 4, 1, 12, 10, 50, 12, 0.05, 3797,
+        #     0.04, 0.5, 1.2, 25, 0.3, 150, 120, 310, 390, 30
+        # ])
+        
+        # Initial guess: use mean of each bound
+        self.x0 = np.array([np.mean(b) for b in self.bounds])
+
+
+#         self.prediction_tag_urls = {
+#         "final_efficiency": "https://example.invalid/endpoint_0242",
+#         "specific_coal": "https://example.invalid/endpoint_0278",
+#         "nox_level": "https://example.invalid/endpoint_0279"
+# }
+        
+        # self.prediction_tag_url =  "https://example.invalid/endpoint_0242"
+        # self.prediction_tag_url = "https://example.invalid/endpoint_0272"  
+        
+        self.tags = self.initialize_tags()
+
+    def load_model(self):
+        logged_model_uri = 'runs:/model_run_0006/model' # BE model
+        return mlflow.xgboost.load_model(logged_model_uri)
+
+    def initialize_tags(self):
+        # Truncated for brevity in this preview
+        return {
+            'SIGNAL_0003': 'https://example.invalid/endpoint_0280    REDACTED_OPAQUE_IDENTIFIER/value',
+            'SIGNAL_0004': 'https://example.invalid/endpoint_0220',
+            'SIGNAL_0005': 'https://example.invalid/endpoint_0221',
+            'SIGNAL_0006': 'https://example.invalid/endpoint_0222',
+            'SIGNAL_0007': 'https://example.invalid/endpoint_0223',
+
+            'SIGNAL_0008': 'https://example.invalid/endpoint_0224',
+            'SIGNAL_0009': 'https://example.invalid/endpoint_0225',
+
+            'SIGNAL_0010': 'https://example.invalid/endpoint_0226',
+            'SIGNAL_0011': 'https://example.invalid/endpoint_0227',
+            'SIGNAL_0012': 'https://example.invalid/endpoint_0228',
+
+            'process_signal_0042': 'https://example.invalid/endpoint_0141',
+                        'process_signal_0043': 'https://example.invalid/endpoint_0142',
+                        'process_signal_0044': 'https://example.invalid/endpoint_0143',
+
+            'process_signal_0090': 'https://example.invalid/endpoint_0130',
+    'process_signal_0091': 'https://example.invalid/endpoint_0131',
+    'process_signal_0092': 'https://example.invalid/endpoint_0132',
+    'process_signal_0093': 'https://example.invalid/endpoint_0133',
+    'process_signal_0047': 'https://example.invalid/endpoint_0229',
+    'process_signal_0048': 
+            'https://example.invalid/endpoint_0230',
+    'process_signal_0100':
+            'https://example.invalid/endpoint_0231',
+    'process_signal_0101': 'https://example.invalid/endpoint_0232',
+            
+    'process_signal_0108': 'https://example.invalid/endpoint_0233',
+
+    'process_signal_0109': 
+'https://example.invalid/endpoint_0234',
+
+    'process_signal_0110': 'https://example.invalid/endpoint_0235',
+
+    'process_signal_0111': 'https://example.invalid/endpoint_0236',}
+
+    def safe_avg(self, values):
+         numeric_values = [v for v in values if isinstance(v, (int, float))]
+         if numeric_values:
+            return sum(numeric_values) / len(numeric_values)
+         else:
+            return None
+
+    def _get_batch_url(self, tag_url):
+        parsed = urlparse(tag_url)
+        return f"{parsed.scheme}://{parsed.netloc}/piwebapi/batch"
+
+    def _batch_fetch(self, urls):
+        if not urls:
+            return
+
+        batch_url = self._get_batch_url(urls[0])  # derive batch URL from first tag URL
+        batch_payload = {
+            f"req{i}": {
+                'Method': 'GET',
+                'Resource': url
+            } for i, url in enumerate(urls)
+        }
+
+        try:
+            response = requests.post(
+                batch_url,
+                json=batch_payload,
+                auth=HTTPBasicAuth(self.username, self.password),
+                verify=False
+            )
+            response.raise_for_status()
+            batch_results = response.json()
+
+            for i, url in enumerate(urls):
+                result = batch_results.get(f"req{i}")
+                value = None
+
+                if result and 'Content' in result:
+                    content = result['Content']
+                    if isinstance(content, dict):
+                        if 'Value' in content:
+                            value = content['Value']
+                        elif 'Value' in content.get('Value', {}):
+                            value = content['Value']['Value']
+
+                self._batch_cache[url] = value
+
+        except Exception as e:
+            print(f"Batch fetch error: {e}")
+            for url in urls:
+                self._batch_cache[url] = None
+
+    def read_tag_value(self, url):
+        with self._batch_lock:
+            now = time.time()
+            self._batch_urls.add(url)
+
+            if (now - self._last_batch_time) > self._batch_interval:
+                urls_to_fetch = list(self._batch_urls)
+                self._batch_urls.clear()
+                self._last_batch_time = now
+                self._batch_fetch(urls_to_fetch)
+
+            if url in self._batch_cache:
+                return self._batch_cache[url]
+
+        # fallback to single fetch if not cached yet
+        try:
+            response = requests.get(url, auth=HTTPBasicAuth(self.username, self.password), verify=False)
+            response.raise_for_status()
+            data = response.json()
+
+            value = data.get('Value')
+            if isinstance(value, (int, float)):
+                return value
+            if isinstance(value, dict):
+                if 'Value' in value:
+                    print(f"Extracted nested value: {value['Value']}")
+                    return value['Value']
+                else:
+                    print(f"No numeric value found in nested dict: {value}")
+                    return None
+
+            print(f"Unexpected value format: {value}")
+            return None
+
+        except Exception as e:
+            print(f"Error fetching from {url}: {e}")
+            return None
+    
+
+            
+    # def read_tag_value(self, url):
+    #     try:
+    #         response = requests.get(url, auth=HTTPBasicAuth(self.username, self.password), verify=False)
+    #         response.raise_for_status()
+    #         data = response.json()
+
+    #         value = data.get("Value")
+
+    #         if isinstance(value, (int, float)):
+    #             return value
+    #         if isinstance(value, dict):
+    #             if "Value" in value:
+    #                 print(f"Extracted nested value: {value['Value']}")
+    #                 return value["Value"]
+    #             else:
+    #                 print(f"No numeric value found in nested dict: {value}")
+    #                 return None
+
+    #         print(f"Unexpected value format: {value}")
+    #         return None
+
+    #     except Exception as e:
+    #         print(f"Error fetching from {url}: {e}")
+    #         return None
+
+    def write_predictions_to_pi(self, predictions: dict):
+        '\n        Writes multiple predictions to their corresponding PI tags.\n        \n        :param predictions: Dictionary where keys are PI tag URLs and values are prediction values.\n        '
+        headers = {'Content-Type': 'application/json'}
+    
+        for url, value in predictions.items():
+            payload = {
+                'Timestamp': '*',
+                'Value': float(value)
+            }
+            try:
+                response = requests.post(
+                    url, json=payload, headers=headers,
+                    auth=HTTPBasicAuth(self.username, self.password),
+                    verify=False
+                )
+                response.raise_for_status()
+                print(f"Successfully wrote prediction {value:.4f} to PI tag: {url}")
+            except Exception as e:
+                print(f"Failed to write prediction to PI tag {url}: {e}")
+        
+    def calculate_losses(self, x):
+        Tfg, Tair, Mdfg, H2, AAS, CO, CO2, ASH, ESP_ASH, TM, AF, GCV = x[:12]
+        RejectQuality = x[22]
+        RejectGCV = x[23]
+        MakeUpWater = x[24]
+        SteamGen = x[25]
+        SteamEnthalpy = x[26]
+        FeedwEnthalpy = x[27]
+        
+        L1 = ((Mdfg * 0.24) * (Tfg - Tair) / GCV) * 100
+        L2 = (TM * (584 + 0.45 * (Tfg - Tair))) / GCV
+        L3 = 8.937 * (584 + 0.45 * (Tfg - Tair)) * H2 / GCV
+        L4 = (AF * AAS * 0.45 * (Tfg - Tair) * 100) / GCV
+        L5 = 0.02
+        L6 = 1.13
+        L7 = ((ASH * 15 / 100) * 10 * 8077) / (100 * GCV)
+        L8 = ((ASH * 80 / 10000) * 0.23 * (Tfg - Tair) * 100) / GCV
+        L9 = ((ASH * 20 / 10000) * 0.23 * (Tfg - Tair) * 100) / GCV
+        L10 = 0.65
+        L11 = ((0.8 * MakeUpWater * 300 + 0.2 * MakeUpWater * 150) * 100) / ((SteamGen * (SteamEnthalpy - FeedwEnthalpy)) / 0.85)
+        L12 = (RejectQuality * RejectGCV * 100) / ((SteamGen * (SteamEnthalpy - FeedwEnthalpy)) * 1000 / 0.85)
+
+        UL = L6 + L7
+        SL = L8 + L9
+        TL = SL
+        total = L1 + L2 + L3 + L4 + L5 + UL + SL + L10 + L11 + L12
+
+        loss_dict = {
+            'Total Loss': total,
+            'L1: Dry Flue Gas Loss': L1,
+            'L2: Moisture in Fuel': L2,
+            'L3: H2 in Fuel': L3,
+            'L4: H2O in Air': L4,
+            'L5: Partial Combustion Loss': L5,
+            'L6: Unburnt ESP Loss': L6,
+            'L7: Unburnt bottom ash loss': L7,
+            'UL: Total Unburnt Loss': UL,
+            'L8: Sensible ESP loss': L8,
+            'L9: Sensible Bottom loss': L9,
+            'TL: Total Sensible Loss': TL,
+            'L10: Radiation Loss': L10,
+            'L11: BlowDown Loss': L11,
+            'L12: Mill Rejection Loss': L12
+        }
+        return total, loss_dict
+
+    def objective(self, x):
+        total_loss, loss_dict = self.calculate_losses(x)
+
+        feature_map = {
+            'process_signal_0032': total_loss,
+            'process_signal_0018': x[12],
+            'process_signal_0004': x[13],
+            'process_signal_0069': loss_dict['L1: Dry Flue Gas Loss'],
+            'process_signal_0081': x[14],
+            'process_signal_0089': x[15],
+            'process_signal_0025': x[16],
+            'process_signal_0038': x[17],
+            'process_signal_0053': x[18],
+            'process_signal_0015': loss_dict['L4: H2O in Air'],
+            'process_signal_0045': x[19],
+            'process_signal_0016': loss_dict['L2: Moisture in Fuel'],
+            'process_signal_0037': x[5],
+            'process_signal_0102': x[20],
+            'process_signal_0113': x[21]
+        }
+
+        input_df = pd.DataFrame([feature_map])[self.model_features]
+
+        efficiency = self.model.predict(input_df)[0]
+
+        return -efficiency  # Minimize for maximization
+
+
+    def run_loop(self):
+        while True:
+            stored_list = [self.read_tag_value(url) for url in self.tags.values()]
+
+            print('')
+            for i, tag in enumerate(self.tags.keys()):
+                print(f"{tag}: {stored_list[i]}")
+
+            # This sequence for fetching data from server
+            # Assign variables (adjust length as per your tags)
+            SIGNAL_0003 = stored_list[0]
+            SIGNAL_0004 = stored_list[1]
+            SIGNAL_0005 = stored_list[2]
+            SIGNAL_0006 = stored_list[3]
+            SIGNAL_0007 = stored_list[4]
+            SIGNAL_0008 = stored_list[5]
+            SIGNAL_0009 = stored_list[6]
+            SIGNAL_0010 = stored_list[7]
+            SIGNAL_0011 = stored_list[8]
+            SIGNAL_0012 = stored_list[9]
+            process_signal_0042 = stored_list[10]
+            process_signal_0043 = stored_list[11]
+            process_signal_0044 = stored_list[12]
+            process_signal_0090 = stored_list[13]
+            process_signal_0091 = stored_list[14]
+            process_signal_0092 = stored_list[15]
+            process_signal_0093 = stored_list[16]
+            process_signal_0047 = stored_list[17]
+            process_signal_0048 = stored_list[18]
+            process_signal_0100 = stored_list[19]
+            process_signal_0101 = stored_list[20]
+            process_signal_0108 = stored_list[21]
+            process_signal_0109 = stored_list[22]
+            process_signal_0110 = stored_list[23]
+            process_signal_0111 = stored_list[24]
+
+           
+            # Short version using slicing
+            Eco_Flue_gas_temp = self.safe_avg(stored_list[10:13])
+            avg_pri_air_fl = self.safe_avg(stored_list[13:17])  
+            ESP_gas_avg_temp = self.safe_avg(stored_list[17:19])  
+            Super_heater_header_temp = self.safe_avg(stored_list[19:21])  
+            Avg_wind_box = self.safe_avg(stored_list[21:25]) 
+
+            # # Short version using slicing
+            # avg_pri_air_fl = sum(stored_list[11:15]) / 4
+            # # avg_pri_air_fl = print(avg_pri_air_fl)
+            # ESP_gas_avg_temp = sum(stored_list[15:17]) / 2
+            # Super_heater_header_temp = sum(stored_list[17:19]) / 2
+            # Avg_wind_box = sum(stored_list[19:23]) / 4
+
+            # Model input (need to maintaint the sequence)
+            Model_inputs = [
+                SIGNAL_0003,
+                SIGNAL_0004,
+                SIGNAL_0005,
+                SIGNAL_0006,
+                SIGNAL_0007,
+                avg_pri_air_fl,
+                SIGNAL_0008,
+                SIGNAL_0009,
+                ESP_gas_avg_temp,
+                SIGNAL_0010,
+                Eco_Flue_gas_temp,
+                SIGNAL_0011,
+                SIGNAL_0012,
+                Super_heater_header_temp,
+                Avg_wind_box
+            ]
+
+            Boiler_eff_prediction = self.model.predict([Model_inputs])[0]
+
+            print('')
+            print(f"Prediction: {Boiler_eff_prediction:.4f}")
+
+            res = minimize(self.objective, self.x0, method='SLSQP', bounds=self.bounds, constraints=self.cons)
+
+            if not res.success:
+                raise RuntimeError(res.message)
+
+            x_opt = res.x
+            efficiency = -res.fun
+            _, loss_dict = self.calculate_losses(x_opt)
+
+            print('\nOptimized Boiler Efficiency:', round(efficiency, 2), '%')
+
+            physical_variables = {}
+            Input_variables = {}
+            losses = {}
+            
+            print('\n=== Physical Variables ===')
+            for var, idx in self.var_index.items():
+                val = x_opt[idx]
+                physical_variables[var] = val
+                # print(f"{var}: {val:.3f}")
+            
+            print('\n=== Additional Input Parameters ===')
+            for name, idx in self.additional_index.items():
+                val = x_opt[idx]
+                Input_variables[name] = val
+                # print(f"{name}: {val:.3f}")
+            
+            print('\n=== All Individual Losses ===')
+            for name, val in loss_dict.items():
+                losses[name] = val
+                # print(f"{name}: {val:.3f}")
+
+            print('cjsfjghbdkj',physical_variables)
+
+            Tfg = physical_variables['Tfg']
+            Tair = physical_variables['Tair']
+            Mdfg = physical_variables['Mdfg']
+            H2 = physical_variables['H2']
+            AAS = physical_variables['AAS']
+            CO = physical_variables['CO']
+            CO2 = physical_variables['CO2']
+            ASH = physical_variables['ASH']
+            ESP_ASH = physical_variables['ESP_ASH']
+            TM = physical_variables['TM']
+            AF = physical_variables['AF']
+            GCV = physical_variables['GCV']
+            
+            MILL_REJ = Input_variables['MILL_REJ']
+            BLOW_DOWN = Input_variables['BLOW_DOWN']
+            ESP_RAD = Input_variables['ESP_RAD']
+            PA_FAN = Input_variables['PA_FAN']
+            COAL_CONS = Input_variables['COAL_CONS']
+            NOX = Input_variables['NOX']
+            ESP_TEMP = Input_variables['ESP_TEMP']
+            ECO_TEMP = Input_variables['ECO_TEMP']
+            SUPR_HTR_HDR_1 = Input_variables['SUPR_HTR']
+            WIND_BOX = Input_variables['WIND_BOX']
+            
+            Total_Loss = losses['Total Loss']
+            Dry_Flue_Gas_Loss = losses['L1: Dry Flue Gas Loss']
+            Moisture_in_Fuel = losses['L2: Moisture in Fuel']
+            H2_in_Fuel = losses['L3: H2 in Fuel']
+            H2O_in_Air = losses['L4: H2O in Air']
+            Partial_Combustion_Loss = losses['L5: Partial Combustion Loss']
+            Unburnt_ESP_Loss = losses['L6: Unburnt ESP Loss']
+            Unburnt_bottom_ash_loss = losses['L7: Unburnt bottom ash loss']
+            Total_Unburnt_Loss = losses['UL: Total Unburnt Loss']
+            Sensible_ESP_loss = losses['L8: Sensible ESP loss']
+            Sensible_Bottom_loss = losses['L9: Sensible Bottom loss']
+            Total_Sensible_Loss = losses['TL: Total Sensible Loss']
+            Radiation_Loss = losses['L10: Radiation Loss']
+
+
+            # self.write_prediction_to_pi(self.prediction_tag_url, prediction)
+            tags_to_write = {'https://example.invalid/endpoint_0281':Boiler_eff_prediction,
+                            'https://example.invalid/endpoint_0282':Total_Loss,
+                            'https://example.invalid/endpoint_0283':Dry_Flue_Gas_Loss,
+                                               'https://example.invalid/endpoint_0284':Moisture_in_Fuel,
+                            'https://example.invalid/endpoint_0285':H2_in_Fuel,
+                                               'https://example.invalid/endpoint_0284':H2O_in_Air,
+                            'https://example.invalid/endpoint_0286':Partial_Combustion_Loss,
+                             
+'https://example.invalid/endpoint_0287' :Radiation_Loss,## ESP_RAD
+                            'https://example.invalid/endpoint_0288':Total_Unburnt_Loss,
+                            'https://example.invalid/endpoint_0289':Total_Sensible_Loss,
+                            'https://example.invalid/endpoint_0290':BLOW_DOWN,
+                            'https://example.invalid/endpoint_0291':MILL_REJ,
+                             
+'https://example.invalid/endpoint_0292':PA_FAN,
+                             
+'https://example.invalid/endpoint_0293':COAL_CONS,
+                             
+'https://example.invalid/endpoint_0294':NOX,
+                             
+'https://example.invalid/endpoint_0295':ESP_TEMP,     
+'https://example.invalid/endpoint_0296':ECO_TEMP, 
+                            'https://example.invalid/endpoint_0297':SUPR_HTR_HDR_1,
+                            'https://example.invalid/endpoint_0298':WIND_BOX}
+            
+            self.write_predictions_to_pi(tags_to_write)
+            
+            print('')
+            print('---- Waiting 1 minute ----\n')
+
+            time.sleep(10)  # 60 seconds as per comment
+
+
+if __name__ == '__main__':
+    utkal_B1 = Utkal_Boiler_B1()
+    example.invalid()

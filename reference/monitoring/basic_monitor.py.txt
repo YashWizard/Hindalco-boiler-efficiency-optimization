@@ -1,0 +1,220 @@
+import requests
+import time
+import pandas as pd
+import matplotlib.pyplot as plt
+from requests.auth import HTTPBasicAuth
+from datetime import datetime
+import warnings
+import urllib3
+from collections import deque
+from IPython.display import clear_output
+
+# Disable warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+warnings.filterwarnings('ignore')
+
+# Your PI credentials
+username = 'REDACTED_CONFIG_VALUE'
+password = 'REDACTED_CONFIG_VALUE'
+
+# Key tags to monitor (same as your dashboard)
+monitoring_tags = {
+    'Fuel_Air_Ratio': 'https://example.invalid/endpoint_0299',
+    
+    'Wind_Box_DP': 'https://example.invalid/endpoint_0301',
+    
+    'Coal_Feeder_Total': 'https://example.invalid/endpoint_0316',
+    
+    'Specific_Coal_Cons': 'https://example.invalid/endpoint_0323'
+}
+
+# Data storage
+data_history = {tag: deque(maxlen=50) for tag in monitoring_tags.keys()}
+time_history = deque(maxlen=50)
+
+def fetch_tag_value(url):
+    'Fetch single tag value from PI'
+    try:
+        response = requests.get(
+            url, 
+            auth=HTTPBasicAuth(username, password), 
+            verify=False, 
+            timeout=10
+        )
+        response.raise_for_status()
+        data = response.json()
+        value = data.get('Value')
+        
+        if isinstance(value, dict) and 'Value' in value:
+            value = value['Value']
+            
+        return float(value) if value is not None else None
+    except Exception as e:
+        print(f"Error fetching data: {e}")
+        return None
+
+def update_plot():
+    'Create live updating plot'
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    fig.suptitle('REAL-TIME PI DATA VERIFICATION - Live Updates', fontsize=16, fontweight='bold')
+    
+    axes = axes.flatten()
+    
+    for i, (tag_name, history) in enumerate(data_history.items()):
+        if i < 4 and len(history) > 0:
+            ax = axes[i]
+            
+            # Plot the data
+            ax.plot(list(range(len(history))), list(history), 'o-', linewidth=2, markersize=4)
+            ax.set_title(f'{tag_name}', fontweight='bold')
+            ax.set_xlabel('Reading Number')
+            ax.set_ylabel('Value')
+            ax.grid(True, alpha=0.3)
+            
+            # Add latest value and change indicator
+            if len(history) > 1:
+                latest = history[-1]
+                previous = history[-2]
+                change = latest - previous
+                
+                # Color code based on change
+                color = 'green' if change > 0 else 'red' if change < 0 else 'blue'
+                change_text = f"↑ +{change:.3f}" if change > 0 else f"↓ {change:.3f}" if change < 0 else '→ No Change'
+                
+                ax.text(0.02, 0.98, f'Latest: {latest:.3f}\n{change_text}', 
+                       transform=ax.transAxes, fontsize=10, fontweight='bold',
+                       verticalalignment='top', color=color,
+                       bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7))
+    
+    plt.tight_layout()
+    plt.show()
+
+def print_data_status(cycle, values):
+    'Print current data status'
+    print(f"\nCYCLE {cycle} - {datetime.now().strftime('%H:%M:%S')}")
+    print('-' * 60)
+    
+    for tag_name, value in values.items():
+        if value is not None:
+            # Check if data changed
+            if len(data_history[tag_name]) > 0:
+                previous = data_history[tag_name][-1]
+                change = value - previous
+                status = '📈 CHANGED' if abs(change) > 0.001 else '➡️ STABLE'
+                print(f"{tag_name:20}: {value:10.4f} | {status}")
+            else:
+                print(f"{tag_name:20}: {value:10.4f} | 🆕 FIRST")
+        else:
+            print(f"{tag_name:20}: {'ERROR':>10} | ❌ FAILED")
+
+# Main monitoring loop
+print('🚀 STARTING REAL-TIME DATA VERIFICATION')
+print('📊 Monitoring 4 key parameters every 30 seconds')
+print('🔄 Watch for changing values to confirm real-time data')
+print('Press Ctrl+C to stop')
+
+try:
+    cycle = 0
+    while True:
+        cycle += 1
+        
+        # Clear previous output for clean display
+        clear_output(wait=True)
+        
+        print(f"📡 REAL-TIME PI DATA MONITORING - Cycle {cycle}")
+        print(f"⏰ Current Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print('=' * 60)
+        
+        # Fetch current values
+        current_values = {}
+        for tag_name, url in monitoring_tags.items():
+            value = fetch_tag_value(url)
+            current_values[tag_name] = value
+            
+            # Store in history
+            if value is not None:
+                data_history[tag_name].append(value)
+        
+        # Store timestamp
+        time_history.append(datetime.now())
+        
+        # Print status
+        print_data_status(cycle, current_values)
+        
+        # Show change analysis
+        if cycle > 1:
+            print(f"\n📊 CHANGE ANALYSIS:")
+            changes_detected = 0
+            for tag_name, value in current_values.items():
+                if value is not None and len(data_history[tag_name]) > 1:
+                    previous = data_history[tag_name][-2]
+                    change = value - previous
+                    if abs(change) > 0.001:
+                        changes_detected += 1
+                        print(f"   {tag_name}: {change:+.4f}")
+            
+            if changes_detected > 0:
+                print(f"\n✅ REAL-TIME CONFIRMED: {changes_detected}/4 parameters changed!")
+                print('   Your system IS reading live data from PI')
+            else:
+                print(f"\n⚠️ No significant changes detected")
+                print('   Data may be stable or system may need checking')
+        
+        # Create live plot
+        print(f"\n📈 LIVE TREND VISUALIZATION:")
+        update_plot()
+        
+        # Data summary table
+        if cycle > 3:
+            print(f"\nDATA SUMMARY (Last {min(cycle, 50)} readings):")
+            print('-' * 60)
+            for tag_name in monitoring_tags.keys():
+                if len(data_history[tag_name]) > 1:
+                    values = list(data_history[tag_name])
+                    min_val = min(values)
+                    max_val = max(values)
+                    avg_val = sum(values) / len(values)
+                    range_val = max_val - min_val
+                    print(f"{tag_name:20}: Avg={avg_val:7.3f} | Range={range_val:7.3f} | Min={min_val:7.3f} | Max={max_val:7.3f}")
+        
+        print(f"\n⏳ Next update in 30 seconds... (Press Ctrl+C to stop)")
+        print('=' * 60)
+        
+        # Wait 30 seconds
+        time.sleep(30)
+        
+except KeyboardInterrupt:
+    print(f"\n🛑 Monitoring stopped by user after {cycle} cycles")
+    
+    # Final verification
+    print(f"\n📋 FINAL VERIFICATION REPORT:")
+    print('=' * 60)
+    
+    total_changes = 0
+    for tag_name in monitoring_tags.keys():
+        if len(data_history[tag_name]) > 1:
+            values = list(data_history[tag_name])
+            unique_values = len(set(f"{v:.3f}" for v in values))  # Count unique values
+            range_val = max(values) - min(values)
+            
+            if unique_values > 1:
+                total_changes += 1
+                status = '✅ LIVE DATA'
+            else:
+                status = '⚠️ STATIC'
+                
+            print(f"{tag_name:20}: {unique_values:2d} unique values | Range: {range_val:7.3f} | {status}")
+    
+    print('-' * 60)
+    if total_changes > 0:
+        print(f"🎉 SUCCESS: {total_changes}/4 parameters show live data changes!")
+        print('🔄 Your boiler optimization system IS reading real-time data')
+    else:
+        print('⚠️ WARNING: No parameters showed significant changes')
+        print('🔍 May indicate stable conditions or connection issues')
+    
+    print(f"\nTotal monitoring cycles: {cycle}")
+    print(f"Monitoring duration: {(cycle * 30) / 60:.1f} minutes")
+
+except Exception as e:
+    print(f"\n❌ Error in monitoring: {e}")

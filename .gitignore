@@ -1,0 +1,22 @@
+# Credentials and private industrial inputs
+.env
+.env.*
+!.env.example
+private_data/
+raw_data/
+*.xlsx
+*.xls
+*.parquet
+*.pkl
+*.joblib
+*.zip
+*.log
+tags
+# Local development artifacts
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+.pytest_cache/
+.DS_Store

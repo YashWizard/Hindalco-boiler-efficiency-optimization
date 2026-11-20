@@ -1,0 +1,449 @@
+############################## PYTHON 3 ############################
+import time
+import os
+import mlflow
+import urllib3
+import requests
+import warnings
+import numpy as np
+import pandas as pd
+from scipy.optimize import minimize
+from requests.auth import HTTPBasicAuth
+from threading import Lock
+from urllib.parse import urlparse
+
+
+class Utkal_Boiler_B2:
+    def __init__(self):
+        
+        # Disable warnings for self-signed SSL certs
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+        # # Credentials
+        self.username = 'REDACTED_CONFIG_VALUE'
+        self.password = 'REDACTED_CONFIG_VALUE'
+
+        self._batch_urls = set()
+        self._batch_cache = {}
+        self._batch_lock = Lock()
+        self._last_batch_time = 0
+        self._batch_interval = 0.5  # seconds
+        
+        # self.username = "REDACTED_CONFIG_VALUE"
+        # self.password = "REDACTED_CONFIG_VALUE"
+
+        os.environ['MLFLOW_TRACKING_INSECURE_TLS'] = 'true'
+        os.environ['MLFLOW_TRACKING_USERNAME'] = 'REDACTED_CONFIG_VALUE'
+        os.environ['MLFLOW_TRACKING_PASSWORD'] = 'REDACTED_CONFIG_VALUE'
+
+        # OR model for Boiler Effeiciency
+        # MLflow configuration
+        mlflow.set_tracking_uri('https://example.invalid/endpoint_0045')
+        self.model = self.load_model()
+
+        # Model features and configuration
+        self.model_features = [
+            'process_signal_0167',              # x[0]
+            'process_signal_0174',                  # x[1]
+            'process_signal_0176',                 # x[2]
+            'process_signal_0202',            # x[3]
+            'process_signal_0215',              # x[4]
+            'process_signal_0171',        # x[5]
+            'process_signal_0204', # x[6]
+            'process_signal_0208',      # x[7]
+            'process_signal_0183',            # x[8]
+            'process_signal_0178',                 # x[9]
+            'process_signal_0187',   # x[10]
+            'process_signal_0189',            # x[11]
+            'process_signal_0194',              # x[12]
+            'process_signal_0169' 
+        ]
+
+        self.bounds = [
+                (2.1, 2.8),     # Fuel-air ratio
+                (150, 300),     # Total air flow
+                (100, 150),     # Wind box dp
+                (10, 50),       # PA fan primary air flow
+                (10, 50),       # Wind box air flow
+                (0.5, 1.5),     # Secondary to primary ratio
+                (120, 300),     # Steam flow
+                (380, 420),     # Superheater temp
+                (290, 350),     # ECO gas temp
+                (20, 250),      # Coal flow
+                (240, 300),     # ESP duct gas temp
+                (150, 250),     # FD water flow
+                (110, 170),     # FD water temp
+                (2, 6),         # Oxygen
+            ]
+
+        self.x0 = [np.mean([low, high]) for (low, high) in self.bounds]
+        self.max_scc = 0.202
+        
+   
+
+        self.cons = [
+            {'type': 'ineq', 'fun': lambda x: x[1] - 150},      # Total Air Flow ≥ 150
+            {'type': 'ineq', 'fun': self.air_to_fuel_ratio},         # Air-to-fuel ratio ≥ 2.11
+            {'type': 'ineq', 'fun': lambda x: x[9] - 10},     # Coal Flow ≥ 15.45
+            {'type': 'ineq', 'fun': lambda x: x[6] - 120},       # Steam ≥ 120
+            {'type': 'ineq', 'fun': lambda x: x[10] - 190},      # APH outlet ≥ 190
+            {'type': 'ineq', 'fun': lambda x: x[2] - 10},        # Wind box dp ≥ 10
+            {'type': 'ineq', 'fun': self.scc_constraint},             # SCC ≤ max_scc
+        ]
+
+        self.tags = self.initialize_tags()
+        
+    def objective(self, x):
+        input_df = pd.DataFrame([x], columns=self.model_features)
+        pred = self.model.predict(input_df)[0]
+        return -pred
+            
+    def air_to_fuel_ratio(self, x):
+        total_air = x[1]
+        coal_flow = x[9]
+        return (total_air / coal_flow) - 2.11
+        # return (coal_flow / total_air) - 2.11
+    
+        
+    def scc_constraint(self, x):
+        coal_flow = x[9]
+        steam_gen = x[6]
+        scc = coal_flow / steam_gen
+        return self.max_scc - scc
+
+    def load_model(self):
+        logged_model_uri = 'runs:/model_run_0004/model' 
+        return mlflow.xgboost.load_model(logged_model_uri)
+
+    def initialize_tags(self):
+        # Truncated for brevity in this preview
+        return {
+            'process_signal_0167': 
+'https://example.invalid/endpoint_0046',
+            
+            'process_signal_0174':        'https://example.invalid/endpoint_0047',
+            
+            'process_signal_0176': 'https://example.invalid/endpoint_0048',
+
+                'process_signal_0198': 'https://example.invalid/endpoint_0049',
+    'process_signal_0199': 'https://example.invalid/endpoint_0050',
+    'process_signal_0200': 'https://example.invalid/endpoint_0051',
+    'process_signal_0201': 'https://example.invalid/endpoint_0052',
+            
+           'process_signal_0211': 'https://example.invalid/endpoint_0053',
+    'process_signal_0212': 'https://example.invalid/endpoint_0054',
+    'process_signal_0213': 'https://example.invalid/endpoint_0055',
+    'process_signal_0214': 'https://example.invalid/endpoint_0056',
+        
+            'process_signal_0197': 'https://example.invalid/endpoint_0057',
+
+            'process_signal_0206':
+'https://example.invalid/endpoint_0058',
+            
+    'process_signal_0207': 'https://example.invalid/endpoint_0059',
+
+            'process_signal_0180': 'https://example.invalid/endpoint_0060',
+
+            'process_signal_0181': 
+'https://example.invalid/endpoint_0061',
+
+            'process_signal_0182': 'https://example.invalid/endpoint_0062',
+
+            'process_signal_0178':
+'https://example.invalid/endpoint_0063',
+
+            'process_signal_0185': 
+'https://example.invalid/endpoint_0064',
+
+            'process_signal_0186': 'https://example.invalid/endpoint_0065',
+
+            'process_signal_0192': 'https://example.invalid/endpoint_0066',
+
+            'process_signal_0193': 
+'https://example.invalid/endpoint_0067',
+
+            'process_signal_0194': 'https://example.invalid/endpoint_0068',
+            
+            'process_signal_0169': 'https://example.invalid/endpoint_0069',
+        
+        'Specific_coal_cons':    'https://example.invalid/endpoint_0070',
+        
+        'process_signal_0172': 'https://example.invalid/endpoint_0071',
+
+       'process_signal_0165':
+'https://example.invalid/endpoint_0072',
+           
+        'process_signal_0209':
+'https://example.invalid/endpoint_0073'}
+
+
+    def safe_avg(self, values):
+         numeric_values = [v for v in values if isinstance(v, (int, float))]
+         if numeric_values:
+            return sum(numeric_values) / len(numeric_values)
+         else:
+            return None
+
+    def _get_batch_url(self, tag_url):
+        parsed = urlparse(tag_url)
+        return f"{parsed.scheme}://{parsed.netloc}/piwebapi/batch"
+
+    def _batch_fetch(self, urls):
+        if not urls:
+            return
+
+        batch_url = self._get_batch_url(urls[0])  # derive batch URL from first tag URL
+        batch_payload = {
+            f"req{i}": {
+                'Method': 'GET',
+                'Resource': url
+            } for i, url in enumerate(urls)
+        }
+
+        try:
+            response = requests.post(
+                batch_url,
+                json=batch_payload,
+                auth=HTTPBasicAuth(self.username, self.password),
+                verify=False
+            )
+            response.raise_for_status()
+            batch_results = response.json()
+
+            for i, url in enumerate(urls):
+                result = batch_results.get(f"req{i}")
+                value = None
+
+                if result and 'Content' in result:
+                    content = result['Content']
+                    if isinstance(content, dict):
+                        if 'Value' in content:
+                            value = content['Value']
+                        elif 'Value' in content.get('Value', {}):
+                            value = content['Value']['Value']
+
+                self._batch_cache[url] = value
+
+        except Exception as e:
+            print(f"Batch fetch error: {e}")
+            for url in urls:
+                self._batch_cache[url] = None
+
+    def read_tag_value(self, url):
+        with self._batch_lock:
+            now = time.time()
+            self._batch_urls.add(url)
+
+            if (now - self._last_batch_time) > self._batch_interval:
+                urls_to_fetch = list(self._batch_urls)
+                self._batch_urls.clear()
+                self._last_batch_time = now
+                self._batch_fetch(urls_to_fetch)
+
+            if url in self._batch_cache:
+                return self._batch_cache[url]
+
+        # fallback to single fetch if not cached yet
+        try:
+            response = requests.get(url, auth=HTTPBasicAuth(self.username, self.password), verify=False)
+            response.raise_for_status()
+            data = response.json()
+
+            value = data.get('Value')
+            if isinstance(value, (int, float)):
+                return value
+            if isinstance(value, dict):
+                if 'Value' in value:
+                    print(f"Extracted nested value: {value['Value']}")
+                    return value['Value']
+                else:
+                    print(f"No numeric value found in nested dict: {value}")
+                    return None
+
+            print(f"Unexpected value format: {value}")
+            return None
+
+        except Exception as e:
+            print(f"Error fetching from {url}: {e}")
+            return None
+    
+    def write_predictions_to_pi(self, predictions: dict):
+        '\n        Writes multiple predictions to their corresponding PI tags.\n        \n        :param predictions: Dictionary where keys are PI tag URLs and values are prediction values.\n        '
+        headers = {'Content-Type': 'application/json'}
+    
+        for url, value in predictions.items():
+            payload = {
+                'Timestamp': '*',
+                'Value': float(value)
+            }
+            try:
+                response = requests.post(
+                    url, json=payload, headers=headers,
+                    auth=HTTPBasicAuth(self.username, self.password),
+                    verify=False
+                )
+                response.raise_for_status()
+                print(f"Successfully wrote prediction {value:.4f} to PI tag: {url}")
+            except Exception as e:
+                print(f"Failed to write prediction to PI tag {url}: {e}")
+
+
+    def run_loop(self):
+        while True:
+            stored_list = [self.read_tag_value(url) for url in self.tags.values()]
+
+            print('')
+            for i, tag in enumerate(self.tags.keys()):
+                print(f"{tag}: {stored_list[i]}")
+
+            # This sequence for fetching data from server
+            # Assign variables (adjust length as per your tags)
+            process_signal_0167 = stored_list[0]
+            process_signal_0174 = stored_list[1]
+            process_signal_0176 = stored_list[2]
+            process_signal_0198 = stored_list[3]
+            process_signal_0199 = stored_list[4]
+            process_signal_0200 = stored_list[5]
+            process_signal_0201 = stored_list[6]
+            process_signal_0211 = stored_list[7]
+            process_signal_0212 = stored_list[8]
+            process_signal_0213 = stored_list[9]
+            process_signal_0214 = stored_list[10]
+            process_signal_0204 = stored_list[11]
+            process_signal_0206 = stored_list[12]
+            process_signal_0207 = stored_list[13]
+            process_signal_0180 = stored_list[14]
+            process_signal_0181 = stored_list[15]
+            process_signal_0182 = stored_list[16]
+            process_signal_0178 = stored_list[17]
+            process_signal_0185 = stored_list[18]
+            process_signal_0186 = stored_list[19]
+            process_signal_0192 = stored_list[20]
+            process_signal_0193 = stored_list[21]
+            process_signal_0194 = stored_list[22]
+            process_signal_0169 = stored_list[23]
+            Specific_coal_cons = stored_list[24]
+            process_signal_0172 = stored_list[25]
+            process_signal_0165 = stored_list[26]
+            process_signal_0209 = stored_list[27]
+
+           
+            # Short version using slicing
+            process_signal_0202 = sum(stored_list[3:7])
+            process_signal_0196 = sum(stored_list[7:11]) 
+            process_signal_0183 = self.safe_avg(stored_list[14:17])
+            # Super_heater_header_temp = self.safe_avg(stored_list[12:14])  
+            process_signal_0187 = self.safe_avg(stored_list[18:20])  
+            process_signal_0190 = sum(stored_list[20:22])
+            
+           
+
+            # # Short version using slicing
+            # avg_pri_air_fl = sum(stored_list[11:15]) / 4
+            # # avg_pri_air_fl = print(avg_pri_air_fl)
+            # ESP_inlet_gas_avg_temp = sum(stored_list[15:17]) / 2
+            # Super_heater_header_temp = sum(stored_list[17:19]) / 2
+            # Avg_wind_box = sum(stored_list[19:23]) / 4
+
+            # Model input (need to maintaint the sequence)
+            Model_inputs = [
+                process_signal_0167,
+                process_signal_0176,
+                process_signal_0202,
+                process_signal_0196, #Replace it with Wind box only
+                process_signal_0204,
+                process_signal_0183,
+                process_signal_0209,
+                process_signal_0178,
+                process_signal_0187, ### similer to APH outlet
+                process_signal_0190,
+                process_signal_0194,  
+                process_signal_0169,
+                process_signal_0172,
+                process_signal_0165,
+            ]
+
+            # print(Specific_coal_cons,"Specific_coal_cons")
+            scc_prediction = self.model.predict([Model_inputs])[0]
+            if scc_prediction > Specific_coal_cons:
+                scc_prediction = Specific_coal_cons
+            
+            print('')
+            print(f"Prediction: {scc_prediction:.4f}")
+
+            res = minimize(self.objective, self.x0, method='SLSQP', bounds=self.bounds, constraints=self.cons)
+
+            if not res.success:
+                raise RuntimeError(res.message)
+
+            x_opt = res.x
+            coal_opt = x_opt[9]
+            steam_opt = x_opt[6]
+            scc_opt = coal_opt / steam_opt
+
+            process_signal_0168 = x_opt[0]
+            process_signal_0177 = x_opt[1]
+            process_signal_0203 = x_opt[2]
+            process_signal_0216 = x_opt[3]  # Replaced to Wind box only
+            process_signal_0205 = x_opt[4]
+            process_signal_0184 = x_opt[5]
+            process_signal_0210 = x_opt[6]
+            process_signal_0179 = x_opt[7]
+            process_signal_0188 = x_opt[8]  # Similar to APH outlet
+            process_signal_0191 = x_opt[9]
+            process_signal_0195 = x_opt[10]
+            process_signal_0170 = x_opt[11]
+            process_signal_0173 = x_opt[12]
+            process_signal_0166 = x_opt[13]
+
+            print(f"Minimized SCC: {scc_opt:.4f} (tons/hr steam)")
+            print(f"Predicted SCC: {-res.fun:.4f}")
+
+            # print("\n=== Optimized Feature Values ===")
+            # for name, val in zip(model_features, x_opt):
+            #     print(f"{name}: {val:.3f}")
+            # # self.write_prediction_to_pi(self.prediction_tag_url, prediction)
+            tags_to_write = {'https://example.invalid/endpoint_0074':scc_prediction,
+                            
+'https://example.invalid/endpoint_0075':process_signal_0168,
+                           # "https://example.invalid/endpoint_0194":process_signal_0175,
+                                            
+'https://example.invalid/endpoint_0076':process_signal_0177,
+                             
+'https://example.invalid/endpoint_0077':process_signal_0203,
+                                                
+'https://example.invalid/endpoint_0078':process_signal_0216,
+#                             "https://example.invalid/endpoint_0157":sec_to_pri_ratio,
+                             
+'https://example.invalid/endpoint_0079' :process_signal_0205,## ESP_RAD
+                             # "https://example.invalid/endpoint_0195":Super_heater_header_temp,
+                             
+'https://example.invalid/endpoint_0080':process_signal_0184,
+
+'https://example.invalid/endpoint_0081':process_signal_0179,
+                             
+'https://example.invalid/endpoint_0082':process_signal_0188,
+              
+'https://example.invalid/endpoint_0083':process_signal_0191,
+                             
+'https://example.invalid/endpoint_0084':process_signal_0195,
+                             
+'https://example.invalid/endpoint_0085':process_signal_0170,
+
+'https://example.invalid/endpoint_0086':process_signal_0166,
+                            
+                            'https://example.invalid/endpoint_0087':process_signal_0173,
+                             
+'https://example.invalid/endpoint_0088':process_signal_0210}
+            
+            self.write_predictions_to_pi(tags_to_write)
+            
+            print('')
+            print('---- Waiting 1 minute ----\n')
+
+            time.sleep(10)  # 60 seconds as per comment
+
+
+if __name__ == '__main__':
+    utkal_B2 = Utkal_Boiler_B2()
+    example.invalid()(140,160)

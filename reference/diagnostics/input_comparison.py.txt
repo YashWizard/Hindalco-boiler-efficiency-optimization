@@ -1,0 +1,254 @@
+import requests
+import time
+import pandas as pd
+from requests.auth import HTTPBasicAuth
+from datetime import datetime
+import warnings
+import urllib3
+
+# Disable SSL warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+warnings.filterwarnings('ignore')
+
+# ===== YOUR PI SYSTEM CREDENTIALS =====
+username = 'REDACTED_CONFIG_VALUE'
+password = 'REDACTED_CONFIG_VALUE'
+
+# ===== COMPLETE PI TAG URLS FROM YOUR SYSTEM =====
+pi_tag_urls = {
+    'FUEL_AIR_RATIO': 'https://example.invalid/endpoint_0299',
+    
+    'TOTAL_AIR_FLOW': 'https://example.invalid/endpoint_0300',
+    
+    'WIND_BOX_DP': 'https://example.invalid/endpoint_0301',
+    
+    'PA_FAN_A_AIR_FL': 'https://example.invalid/endpoint_0302',
+    
+    'PA_FAN_B_AIR_FL': 'https://example.invalid/endpoint_0303',
+    
+    'COAL_FEEDER_TOTAL': 'https://example.invalid/endpoint_0316',
+    
+    'MAIN_STEAM_FLOW': 'https://example.invalid/endpoint_0310',
+    
+    'SUPERHEATER_TEMP_1': 'https://example.invalid/endpoint_0311',
+    
+    'ECO_FLUE_GAS_TEMP_1': 'https://example.invalid/endpoint_0313',
+    
+    'FEED_WATER_TEMP': 'https://example.invalid/endpoint_0321',
+    
+    'OXYGEN': 'https://example.invalid/endpoint_0322',
+    
+    'SPECIFIC_COAL_CONS': 'https://example.invalid/endpoint_0323',
+    
+    'STEAM_ENTHALPY': 'https://example.invalid/endpoint_0324',
+    
+    'FEED_WATER_ENTHALPY': 'https://example.invalid/endpoint_0325',
+    
+    'MAIN_STEAM_HDR_TEMP': 'https://example.invalid/endpoint_0326'
+}
+
+def fetch_pi_values(round_name):
+    'Fetch current values from PI system with timestamps'
+    print(f"\n{'='*80}")
+    print(f"🔄 {round_name} - FETCHING PI TAG VALUES")
+    print(f"⏰ Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"{'='*80}")
+    
+    values_dict = {}
+    
+    for tag_name, url in pi_tag_urls.items():
+        try:
+            # Fetch from PI Web API
+            response = requests.get(
+                url, 
+                auth=HTTPBasicAuth(username, password), 
+                verify=False, 
+                timeout=10
+            )
+            response.raise_for_status()
+            
+            # Parse response
+            data = response.json()
+            value = data.get('Value')
+            
+            # Handle nested value structure
+            if isinstance(value, dict) and 'Value' in value:
+                value = value['Value']
+            
+            # Store and display
+            values_dict[tag_name] = value
+            print(f"{tag_name:30}: {value:>15.6f}")
+            
+        except requests.exceptions.RequestException as e:
+            print(f"{tag_name:30}: ERROR - Network/HTTP: {e}")
+            values_dict[tag_name] = None
+        except ValueError as e:
+            print(f"{tag_name:30}: ERROR - JSON Parse: {e}")
+            values_dict[tag_name] = None
+        except Exception as e:
+            print(f"{tag_name:30}: ERROR - {type(e).__name__}: {e}")
+            values_dict[tag_name] = None
+    
+    return values_dict
+
+def compare_values(values1, values2):
+    'Compare two sets of values to detect changes'
+    print(f"\n{'='*80}")
+    print('📊 REAL-TIME DATA VERIFICATION - CHANGE ANALYSIS')
+    print(f"{'='*80}")
+    
+    changes_detected = 0
+    total_valid_comparisons = 0
+    
+    print(f"{'Tag Name':<30} | {'Reading 1':>15} | {'Reading 2':>15} | {'Change':>15} | {'Status'}")
+    print('-' * 95)
+    
+    for tag_name in pi_tag_urls.keys():
+        val1 = values1.get(tag_name)
+        val2 = values2.get(tag_name)
+        
+        if val1 is not None and val2 is not None:
+            total_valid_comparisons += 1
+            change = abs(val2 - val1)
+            
+            if change > 0.001:  # Threshold for detecting meaningful change
+                changes_detected += 1
+                status = '✅ CHANGED'
+            else:
+                status = '➡️ STABLE'
+            
+            print(f"{tag_name:<30} | {val1:>15.6f} | {val2:>15.6f} | {change:>15.6f} | {status}")
+        else:
+            print(f"{tag_name:<30} | {'ERROR':>15} | {'ERROR':>15} | {'N/A':>15} | ❌ ERROR")
+    
+    # Summary
+    print('-' * 95)
+    print(f"📈 SUMMARY:")
+    print(f"   • Total Tags Compared: {total_valid_comparisons}")
+    print(f"   • Tags with Changes: {changes_detected}")
+    print(f"   • Change Detection Rate: {(changes_detected/max(1,total_valid_comparisons))*100:.1f}%")
+    
+    if changes_detected > 0:
+        print(f"✅ REAL-TIME DATA CONFIRMED: {changes_detected} tags show live data changes!")
+        print(f"   Your model IS reading real-time data from the PI system.")
+    else:
+        print(f"⚠️ NO CHANGES DETECTED: Data appears static.")
+        print(f"   Check if plant is running or if there's a data delay.")
+    
+    return changes_detected > 0
+
+def run_model_prediction_test(current_values):
+    'Test your model with current real-time data'
+    try:
+        import mlflow
+        import pandas as pd
+        import os
+        
+        # Setup MLflow (your configuration)
+        os.environ['MLFLOW_TRACKING_INSECURE_TLS'] = 'true'
+        os.environ['MLFLOW_TRACKING_USERNAME'] = 'REDACTED_CONFIG_VALUE'
+        os.environ['MLFLOW_TRACKING_PASSWORD'] = 'REDACTED_CONFIG_VALUE'
+        mlflow.set_tracking_uri('https://example.invalid/endpoint_0045')
+        
+        # Load your model
+        logged_model_uri = 'runs:/model_run_0002/model'
+        model = mlflow.xgboost.load_model(logged_model_uri)
+        
+        # Prepare model input (using your feature order)
+        model_features = [
+            'process_signal_0119',
+            'process_signal_0126',
+            'process_signal_0152',
+            'process_signal_0146',
+            'process_signal_0154',
+            'process_signal_0133',
+            'process_signal_0158',
+            'process_signal_0128',
+            'process_signal_0137',
+            'process_signal_0139',
+            'process_signal_0144',
+            'process_signal_0121',
+            'process_signal_0123',
+            'process_signal_0117'
+        ]
+        
+        # Map your current values to model inputs (you'll need to aggregate some values)
+        model_inputs = [
+            current_values.get('FUEL_AIR_RATIO', 2.5),  # x[0]
+            current_values.get('WIND_BOX_DP', 200),     # x[1]
+            current_values.get('PA_FAN_A_AIR_FL', 50) + current_values.get('PA_FAN_B_AIR_FL', 50),  # x[2] - aggregated
+            current_values.get('WIND_BOX_DP', 100),     # x[3] - placeholder for wind box total
+            current_values.get('MAIN_STEAM_FLOW', 200), # x[4]
+            current_values.get('ECO_FLUE_GAS_TEMP_1', 450),  # x[5]
+            current_values.get('MAIN_STEAM_HDR_TEMP', 500),  # x[6]
+            current_values.get('COAL_FEEDER_TOTAL', 40),     # x[7]
+            current_values.get('ECO_FLUE_GAS_TEMP_1', 300),  # x[8] - placeholder for ESP temp
+            current_values.get('FEED_WATER_TEMP', 160) * 2,  # x[9] - placeholder for feed water flow
+            current_values.get('FEED_WATER_TEMP', 160),      # x[10]
+            current_values.get('OXYGEN', 200),               # x[11]
+            current_values.get('STEAM_ENTHALPY', 800),       # x[12]
+            current_values.get('FEED_WATER_ENTHALPY', 150)   # x[13]
+        ]
+        
+        # Make prediction
+        prediction = model.predict([model_inputs])[0]
+        
+        print(f"\n{'='*80}")
+        print('🤖 LIVE MODEL PREDICTION TEST')
+        print(f"{'='*80}")
+        print(f"🔮 Model Prediction (SCC): {prediction:.6f}")
+        print(f"📊 Actual SCC from PI: {current_values.get('SPECIFIC_COAL_CONS', 'N/A')}")
+        
+        if current_values.get('SPECIFIC_COAL_CONS'):
+            error = abs(prediction - current_values['SPECIFIC_COAL_CONS'])
+            print(f"📈 Prediction Error: {error:.6f}")
+            print(f"✅ Model successfully processed real-time data!")
+        
+        return prediction
+        
+    except Exception as e:
+        print(f"\n❌ Model prediction test failed: {e}")
+        return None
+
+# ===== MAIN EXECUTION =====
+print('🚀 STARTING REAL-TIME DATA VERIFICATION TEST')
+print('🔍 This will prove your model is reading live PI system data')
+
+# First reading
+values_reading_1 = fetch_pi_values('READING 1')
+
+print(f"\n⏳ Waiting 30 seconds for data to change...")
+print('💡 TIP: If possible, make a small change in your plant DCS to see immediate effect')
+
+# Wait for data to change
+time.sleep(30)
+
+# Second reading
+values_reading_2 = fetch_pi_values('READING 2')
+
+# Compare the readings
+real_time_confirmed = compare_values(values_reading_1, values_reading_2)
+
+# Test model prediction with real-time data
+if real_time_confirmed:
+    print(f"\n🎯 Testing your ML model with live data...")
+    prediction = run_model_prediction_test(values_reading_2)
+
+print(f"\n{'='*80}")
+print('🏁 FINAL VERDICT')
+print(f"{'='*80}")
+
+if real_time_confirmed:
+    print('✅ SUCCESS: Your model IS reading real-time data from PI system!')
+    print('📡 Data source: Live PI Web API')
+    print('🔄 Update field_0086: field_0087-field_0088')
+    print('🎯 Model integration: Confirmed working')
+else:
+    print('⚠️ WARNING: No data changes detected')
+    print('🔍 Possible reasons:')
+    print('   • Plant might be in steady state')
+    print('   • PI system might have data delays')
+    print('   • Network connection issues')
+    print('   • Try running again during plant transitions')
+
+print(f"\n📋 TEST COMPLETED AT: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")

@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="440" viewBox="0 0 1100 440" role="img">
+<title>Hindalco: source-level component map</title>
+<rect width="1100" height="440" fill="#f5f8fc"/>
+<defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#476780"/></marker></defs>
+<text x="30" y="40" font-family="sans-serif" font-size="25" fill="#12344a">Hindalco — source-level component map</text>
+<text x="30" y="80" font-family="sans-serif" font-size="16" font-weight="bold" fill="#12344a">Model development</text>
+<rect x="30" y="92" width="320" height="48" rx="7" fill="white" stroke="#93a9bb"/>
+<text x="190" y="122" text-anchor="middle" font-family="sans-serif" font-size="15" fill="#163e57">Historical process dataset</text>
+<path d="M352,116 H379" stroke="#476780" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="385" y="92" width="320" height="48" rx="7" fill="white" stroke="#93a9bb"/>
+<text x="545" y="122" text-anchor="middle" font-family="sans-serif" font-size="15" fill="#163e57">Feature preparation + XGBoost</text>
+<path d="M707,116 H734" stroke="#476780" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="740" y="92" width="320" height="48" rx="7" fill="white" stroke="#93a9bb"/>
+<text x="900" y="122" text-anchor="middle" font-family="sans-serif" font-size="15" fill="#163e57">Saved evaluation summaries</text>
+<text x="30" y="180" font-family="sans-serif" font-size="16" font-weight="bold" fill="#12344a">Optimisation references</text>
+<rect x="30" y="192" width="320" height="48" rx="7" fill="white" stroke="#93a9bb"/>
+<text x="190" y="222" text-anchor="middle" font-family="sans-serif" font-size="15" fill="#163e57">PI measurements + model</text>
+<path d="M352,216 H379" stroke="#476780" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="385" y="192" width="320" height="48" rx="7" fill="white" stroke="#93a9bb"/>
+<text x="545" y="222" text-anchor="middle" font-family="sans-serif" font-size="15" fill="#163e57">Bounds + multistart SLSQP</text>
+<path d="M707,216 H734" stroke="#476780" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="740" y="192" width="320" height="48" rx="7" fill="white" stroke="#93a9bb"/>
+<text x="900" y="222" text-anchor="middle" font-family="sans-serif" font-size="15" fill="#163e57">Candidate recommendations</text>
+<text x="30" y="280" font-family="sans-serif" font-size="16" font-weight="bold" fill="#12344a">Alternative experiments</text>
+<rect x="30" y="292" width="320" height="48" rx="7" fill="white" stroke="#93a9bb"/>
+<text x="190" y="322" text-anchor="middle" font-family="sans-serif" font-size="15" fill="#163e57">Measured coal / steam flow</text>
+<path d="M352,316 H379" stroke="#476780" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="385" y="292" width="320" height="48" rx="7" fill="white" stroke="#93a9bb"/>
+<text x="545" y="322" text-anchor="middle" font-family="sans-serif" font-size="15" fill="#163e57">Direct ratio or target search</text>
+<path d="M707,316 H734" stroke="#476780" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="740" y="292" width="320" height="48" rx="7" fill="white" stroke="#93a9bb"/>
+<text x="900" y="322" text-anchor="middle" font-family="sans-serif" font-size="15" fill="#163e57">Candidate flow / SCC values</text>
+<text x="30" y="397" font-family="sans-serif" font-size="16" fill="#4d5964">Training-to-remote-model lineage and application of recommendations are not established.</text>
+<text x="30" y="423" font-family="sans-serif" font-size="13" fill="#4d5964">New documentation illustration. Arrows summarize source logic, not verified operational use.</text>
+</svg>

@@ -1,0 +1,372 @@
+import time
+import os
+import mlflow
+import urllib3
+import requests
+import warnings
+import numpy as np
+import pandas as pd
+import argparse
+from scipy.optimize import minimize
+from requests.auth import HTTPBasicAuth
+from threading import Lock
+from urllib.parse import urlparse
+from collections import deque
+from minio import Minio
+from minio.error import S3Error
+from io import BytesIO
+from datetime import datetime
+
+# --- Tag Map Loader ---
+def load_tag_map_csv_from_minio(minio_client, bucket_name, object_name):
+    try:
+        response = minio_client.get_object(bucket_name, object_name)
+        data = response.read()
+        df = pd.read_csv(BytesIO(data))
+        return dict(zip(df['tag_name'], df['url']))
+    except Exception as e:
+        print(f"Failed to load tag map from MinIO: {e}")
+        return {}
+
+class SCCOptimizer:
+    def __init__(self, bound_strategy='min-max'):
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        warnings.filterwarnings('ignore', category=UserWarning)
+        self.WINDOW_SEC = 120 # 120 second monitoring cycle
+        self.SAMPLE_SEC = 5   # Sample every 5 seconds
+        self.ROUND_DIGITS = 3
+
+        # **CONSTANT SCC CONFIGURATION**
+        self.CONSTANT_SCC = 0.190  # **NEW: Constant SCC value**
+        self.MAX_SCC = 0.210       # Keep for reference
+        self.TARGET_SCC = 0.190    # Same as constant
+        self.MIN_SCC = 0.180       # Keep for reference
+        self.bound_strategy = bound_strategy
+
+        # Credentials
+        self.username = 'REDACTED_CONFIG_VALUE'
+        self.password = 'REDACTED_CONFIG_VALUE'
+
+        # Batch processing variables
+        self._batch_urls = set()
+        self._batch_cache = {}
+        self._batch_lock = Lock()
+        self._last_batch_time = 0
+        self._batch_interval = 0.5  # seconds
+
+        # MLflow configuration
+        os.environ['MLFLOW_TRACKING_INSECURE_TLS'] = 'true'
+        os.environ['MLFLOW_TRACKING_USERNAME'] = 'REDACTED_CONFIG_VALUE'
+        os.environ['MLFLOW_TRACKING_PASSWORD'] = 'REDACTED_CONFIG_VALUE'
+        mlflow.set_tracking_uri('https://example.invalid/endpoint_0045')
+
+        # MinIO setup
+        self.minio_client = Minio(
+            endpoint='REDACTED_CONFIG_VALUE',
+            access_key='REDACTED_CONFIG_VALUE',
+            secret_key='REDACTED_CONFIG_VALUE',
+            secure=False
+        )
+        # no changes here
+        self.bucket_name = 'REDACTED_CONFIG_VALUE'
+        self.input_tag_map_object = 'silver_data_layer/cgpp/Web APIs/boiler1_read_tag_map.csv'
+        self.output_tag_map_object = 'silver_data_layer/cgpp/Web APIs/boiler1_write_tag_map.csv'
+
+        # Load input and output tag maps
+        self.input_tags = load_tag_map_csv_from_minio(
+            self.minio_client,
+            self.bucket_name,
+            self.input_tag_map_object
+        )
+
+        self.output_tags = load_tag_map_csv_from_minio(
+            self.minio_client,
+            self.bucket_name,
+            self.output_tag_map_object
+        )
+
+        # Load model
+        self.model = self.load_model()
+
+        # Model features in exact order
+        self.model_features = [
+            'process_signal_0012', # x[0]
+            'process_signal_0035',    # x[1]
+            'process_signal_0094', # x[2]
+            'process_signal_0067', # x[3]
+            'process_signal_0096', # x[4]
+            'process_signal_0045', # x[5]
+            'process_signal_0104', # x[6]
+            'process_signal_0040', # x[7]
+            'process_signal_0051', # x[8]
+            'process_signal_0056', # x[9]
+            'process_signal_0060', # x[10]
+            'process_signal_0020', # x[11]
+            'process_signal_0026', # x[12]
+            'process_signal_0008', # x[13]
+        ]
+
+        # Load tags from CSV
+        self.input_tags = load_tag_map_csv_from_minio(self.minio_client, self.bucket_name, self.input_tag_map_object)
+        self.output_tags = load_tag_map_csv_from_minio(self.minio_client, self.bucket_name, self.output_tag_map_object)
+
+        self.input_tag_urls = [self.input_tags[feature] for feature in self.model_features]
+
+        # Rolling buffers for monitoring
+        buffer_size = self.WINDOW_SEC // self.SAMPLE_SEC
+        self.buffers = {url: deque(maxlen=buffer_size) for url in self.input_tag_urls}
+
+        print(f"Initialized SCC Optimizer in CONSTANT MODE")
+        print(f"**SCC will be set to constant value: {self.CONSTANT_SCC}**")
+
+    def load_model(self):
+        logged_model_uri = 'runs:/model_run_0002/model'
+        return mlflow.xgboost.load_model(logged_model_uri)
+
+    def safe_avg(self, values):
+        numeric_values = [v for v in values if isinstance(v, (int, float))]
+        if numeric_values:
+            return sum(numeric_values) / len(numeric_values)
+        return None
+
+    def _get_batch_url(self, tag_url):
+        parsed = urlparse(tag_url)
+        return f"{parsed.scheme}://{parsed.netloc}/piwebapi/batch"
+
+    def _batch_fetch(self, urls):
+        if not urls:
+            return
+        batch_url = self._get_batch_url(urls[0])
+        batch_payload = {
+            f"req{i}": {'Method': 'GET', 'Resource': url}
+            for i, url in enumerate(urls)
+        }
+        try:
+            response = requests.post(
+                batch_url,
+                json=batch_payload,
+                auth=HTTPBasicAuth(self.username, self.password),
+                verify=False,
+                timeout=10
+            )
+            response.raise_for_status()
+            batch_results = response.json()
+            for i, url in enumerate(urls):
+                result = batch_results.get(f"req{i}")
+                value = None
+                if result and 'Content' in result:
+                    content = result['Content']
+                    if isinstance(content, dict):
+                        if 'Value' in content:
+                            value = content['Value']
+                        elif 'Value' in content.get('Value', {}):
+                            value = content['Value']['Value']
+                self._batch_cache[url] = value
+        except Exception as e:
+            print(f"Batch fetch error: {e}")
+            for url in urls:
+                self._batch_cache[url] = None
+
+    def read_tag_value(self, url):
+        with self._batch_lock:
+            now = time.time()
+            self._batch_urls.add(url)
+
+            if (now - self._last_batch_time) > self._batch_interval:
+                urls_to_fetch = list(self._batch_urls)
+                self._batch_urls.clear()
+                self._last_batch_time = now
+                self._batch_fetch(urls_to_fetch)
+
+            if url in self._batch_cache:
+                cached_value = self._batch_cache[url]
+                return self._extract_numeric_value(cached_value)
+
+        # fallback to single fetch if not cached
+        try:
+            response = requests.get(url, auth=HTTPBasicAuth(self.username, self.password), verify=False)
+            response.raise_for_status()
+            data = response.json()
+
+            value = data.get('Value', None)
+            return self._extract_numeric_value(value)
+
+        except Exception as e:
+            print(f"Error fetching from {url}: {e}")
+            return None
+
+    def _extract_numeric_value(self, value):
+        if isinstance(value, (int, float)):
+            return value
+        if isinstance(value, dict):
+            nested_value = value.get('Value', None)
+            if isinstance(nested_value, (int, float)):
+                return nested_value
+        return None
+
+    def scc_objective(self, x):
+        return x[7] / x[4]  # coal/steam
+
+    def collect_current_data(self):
+        try:
+            stored_list = [self.read_tag_value(url) for url in self.input_tags.values()]
+            PA_FAN_PRI_AIR_FL_TOT = sum(v for v in stored_list[3:7] if v is not None)
+            WIND_BOX_AIR_FL_TOT = sum(v for v in stored_list[8:12] if v is not None)
+            ECO_FLUE_GAS_TEMP_AVG = self.safe_avg(stored_list[16:19])
+            ESP_DUCT_INL_FLUE_GAS_TEMP_AVG = self.safe_avg(stored_list[21:23])
+            FD_WTR_REG_STN_FL_TOT = sum(v for v in stored_list[24:26] if v is not None)
+            model_inputs = [
+                stored_list[0],   # FUEL_AIR_RATIO
+                stored_list[2],   # WIND_BOX_DP
+                PA_FAN_PRI_AIR_FL_TOT,
+                WIND_BOX_AIR_FL_TOT,
+                stored_list[13],  # PRESS_PIPNG_MN_STM_FL_TRNSMTR_01
+                ECO_FLUE_GAS_TEMP_AVG,
+                stored_list[31],  # SUPR_HTR_MN_STM_HDR_TEMP_02
+                stored_list[20],  # COAL_FDR_TOT_FLW
+                ESP_DUCT_INL_FLUE_GAS_TEMP_AVG,
+                FD_WTR_REG_STN_FL_TOT,
+                stored_list[27],  # FD_WTR_REG_STN_TEMP
+                stored_list[28],              # FIXED O2
+                stored_list[30],  # SIGNAL_0001
+                stored_list[31],  # SIGNAL_0002
+            ]
+            for i, val in enumerate(model_inputs):
+                if val is None or not isinstance(val, (int, float)):
+                    print(f"WARNING: Model input x[{i}] is invalid: {val} - using fallback")
+                    if i == 11:
+                        model_inputs[i] = 5.0
+                    else:
+                        model_inputs[i] = 100.0
+            return model_inputs
+        except Exception as e:
+            print(f"Error in data collection: {e}")
+            return None
+
+    def write_predictions_to_pi(self, predictions_dict):
+        headers = {'Content-Type': 'application/json'}
+        for tag_name, value in predictions_dict.items():
+            if tag_name in self.output_tags:
+                url = self.output_tags[tag_name]
+                payload = {'Timestamp': '*', 'Value': float(value)}
+                try:
+                    response = requests.post(
+                        url,
+                        json=payload,
+                        headers=headers,
+                        auth=HTTPBasicAuth(self.username, self.password),
+                        verify=False,
+                        timeout=10
+                    )
+                    response.raise_for_status()
+                    print(f"Written {tag_name}: {value:.3f}")
+                except Exception as e:
+                    print(f"Failed to write {tag_name}: {e}")
+
+    def run_optimization_cycle(self):
+        print(f"\n{'='*80}")
+        print(f"SCC CONSTANT VALUE MODE - {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"{'='*80}")
+
+        current_data = self.collect_current_data()
+        if current_data is None:
+            print('Skipping cycle: Failed to collect valid data')
+            return
+        else:
+            print('Current Data collected successfully')
+
+            steam_flow = current_data[4]
+            if steam_flow < 120:
+                print(f"Skipping cycle: Steam flow ({steam_flow:.1f}) < 120 t/h")
+                return
+
+            current_scc = round(current_data[7] / current_data[4], self.ROUND_DIGITS)
+
+            print(f"\n=== CURRENT STATE ANALYSIS ===")
+            print(f"Current SCC: {current_scc:.6f}")
+            print(f"**SETTING CONSTANT SCC: {self.CONSTANT_SCC}**")
+
+            # **CONSTANT SCC VALUE**
+            scc_constant = self.CONSTANT_SCC
+
+            # Calculate required coal flow for constant SCC
+            required_coal_flow = scc_constant * steam_flow
+
+            print(f"\n=== CONSTANT SCC CALCULATION ===")
+            print(f"Target SCC: {scc_constant:.6f} (CONSTANT)")
+            print(f"Current Steam Flow: {steam_flow:.3f} t/h")
+            print(f"Required Coal Flow: {required_coal_flow:.3f} t/h")
+            print(f"Current Coal Flow: {current_data[7]:.3f} t/h")
+            print(f"Coal Flow Adjustment: {required_coal_flow - current_data[7]:+.3f} t/h")
+
+            # Use current data for other parameters, only adjust coal flow
+            x_opt = current_data.copy()
+            x_opt[7] = required_coal_flow  # Set coal flow to achieve constant SCC
+
+            print(f"\n=== PARAMETER VALUES (SCC = {self.CONSTANT_SCC} CONSTANT) ===")
+            param_names = [
+                'Fuel Air Ratio', 'Wind Box DP', 'PA Fan Total', 'Wind Box Air Total',
+                'Steam Flow', 'ECO Gas Temp', 'Steam Temp', 'Coal Flow',
+                'ESP Temp', 'Feed Water Flow', 'Feed Water Temp', 'O2%',
+                'Steam Enthalpy', 'Feed Water Enthalpy'
+            ]
+
+            for i, (name, current, optimized) in enumerate(zip(param_names, current_data, x_opt)):
+                change = optimized - current
+                if i in [4, 7]:  # Highlight steam flow and coal flow
+                    print(f"x[{i:2d}] {name:20}: {current:8.3f} -> {optimized:8.3f} (Δ{change:+7.3f}) [KEY]")
+                else:
+                    print(f"x[{i:2d}] {name:20}: {current:8.3f} -> {optimized:8.3f} (Δ{change:+7.3f})")
+
+            # Predictions with constant SCC
+            predictions = {
+                #"Specific_coal_cons": scc_constant,  # **CONSTANT 0.190**
+                'SCC_PRED': scc_constant,            # **CONSTANT 0.190**
+                'FUEL_AIR_RATIO_PRED': x_opt[0],
+                'WIND_BOX_DP_PRED': x_opt[1],
+                'PA_FAN_TOT_PRED': x_opt[2],
+                'WIND_BOX_AIR_TOT_PRED': x_opt[3],
+                'STEAM_FLOW_PRED': x_opt[4],
+                'ECO_GAS_TEMP_PRED': x_opt[5],
+                'STEAM_TEMP_PRED': x_opt[6],
+                'COAL_FLOW_PRED': x_opt[7],          # **CALCULATED FOR CONSTANT SCC**
+                'ESP_TEMP_PRED': x_opt[8],
+                'FDW_FLOW_PRED': x_opt[9],
+                'FDW_TEMP_PRED': x_opt[10],
+                'O2_PRED': x_opt[11],
+                'STM_ENTH_PRED': x_opt[12],
+                'FDW_ENTH_PRED': x_opt[13],
+            }
+
+            print(f"\n=== WRITING TO PI (CONSTANT SCC = {self.CONSTANT_SCC}) ===")
+            self.write_predictions_to_pi(predictions)
+
+    def run_real_time_loop(self):
+        print(f"Starting SCC Optimizer - CONSTANT SCC MODE")
+        print(f"**SCC will be maintained at constant value: {self.CONSTANT_SCC}**")
+        print(f"Monitoring: {self.WINDOW_SEC}s window, {self.SAMPLE_SEC}s samples")
+
+        try:
+            for url in self.input_tag_urls:
+                value = self.read_tag_value(url)
+                if value is not None:
+                    self.buffers[url].append(value)
+
+            self.run_optimization_cycle()
+            print('\nCompleted one constant SCC cycle')
+
+        except Exception as e:
+            print(f"Error in main loop: {e}")
+
+def main():
+    parser = argparse.ArgumentParser(description='SCC Optimizer - CONSTANT SCC = 0.190')
+    parser.add_argument('--bounds', choices=['min-max', 'mean-max'],
+                        default='min-max',
+                        help='Bounds strategy for monitoring')
+    args = parser.parse_args()
+
+    optimizer = SCCOptimizer(bound_strategy=args.bounds)
+    optimizer.run_real_time_loop()
+
+if __name__ == '__main__':
+    main()
